@@ -75,9 +75,15 @@
           { opcode: 'isConnected', blockType: BlockType.BOOLEAN, text: 'connected?' },
           { opcode: 'sendMessage', blockType: BlockType.COMMAND, text: 'send message [TEXT] to channel [CHANNEL]', arguments: { TEXT: { type: ArgumentType.STRING, defaultValue: 'Hello!' }, CHANNEL: { type: ArgumentType.STRING, defaultValue: '1234567890' } } },
           { opcode: 'refreshChannels', blockType: BlockType.COMMAND, text: 'refresh server + channel list' },
+
+          // Guild / Channels Blocks
           { opcode: 'listGuilds', blockType: BlockType.REPORTER, text: 'all servers' },
-          { opcode: 'listChannels', blockType: BlockType.REPORTER, text: 'channels in server [GUILD]', arguments: { GUILD: { type: ArgumentType.STRING, defaultValue: '' } } },
-          { opcode: 'channelsWithTypes', blockType: BlockType.REPORTER, text: 'channels with types in server [GUILD]', arguments: { GUILD: { type: ArgumentType.STRING, defaultValue: '' } } },
+          { opcode: 'textChannels', blockType: BlockType.REPORTER, text: 'text channels in server [GUILD]', arguments: { GUILD: { type: ArgumentType.STRING, defaultValue: '' } } },
+          { opcode: 'voiceChannels', blockType: BlockType.REPORTER, text: 'voice channels in server [GUILD]', arguments: { GUILD: { type: ArgumentType.STRING, defaultValue: '' } } },
+          { opcode: 'channelsWithTypes', blockType: BlockType.REPORTER, text: 'all channels with types in server [GUILD]', arguments: { GUILD: { type: ArgumentType.STRING, defaultValue: '' } } },
+          { opcode: 'getChannelId', blockType: BlockType.REPORTER, text: 'get channel id for [NAME] in server [GUILD]', arguments: { NAME: { type: ArgumentType.STRING, defaultValue: '' }, GUILD: { type: ArgumentType.STRING, defaultValue: '' } } },
+
+          // Message Blocks
           { opcode: 'whenMessageReceived', blockType: BlockType.HAT, text: 'when discord message received' },
           { opcode: 'lastContent', blockType: BlockType.REPORTER, text: 'last msg content' },
           { opcode: 'lastAuthor', blockType: BlockType.REPORTER, text: 'last msg author' },
@@ -99,12 +105,32 @@
 
     refreshChannels() { if (this.isConnected()) ws.send(safeJSON({ type: 'getGuildChannels' })); }
 
+    // Guild / Channel helpers
     listGuilds() { return Object.values(guildChannels).map(g => g.guildName).join(', '); }
-    listChannels(args) { const g = guildChannels[args.GUILD]; if (!g) return ''; return g.channels.map(c => c.name).join(', '); }
-    channelsWithTypes(args) { const g = guildChannels[args.GUILD]; if (!g) return ''; return g.channels.map(c => `${c.name} (${c.type})`).join(', '); }
 
+    textChannels(args) {
+      const g = guildChannels[args.GUILD]; if (!g) return '';
+      return g.channels.filter(c => c.type === 0).map(c => c.name).join(', ');
+    }
+
+    voiceChannels(args) {
+      const g = guildChannels[args.GUILD]; if (!g) return '';
+      return g.channels.filter(c => c.type === 2).map(c => c.name).join(', ');
+    }
+
+    channelsWithTypes(args) {
+      const g = guildChannels[args.GUILD]; if (!g) return '';
+      return g.channels.map(c => `${c.name} (${c.type})`).join(', ');
+    }
+
+    getChannelId(args) {
+      const g = guildChannels[args.GUILD]; if (!g) return '';
+      const ch = g.channels.find(c => c.name.toLowerCase() === String(args.NAME || '').toLowerCase());
+      return ch ? ch.id : '';
+    }
+
+    // Message blocks
     whenMessageReceived() { if (messageQueue.length > 0) { messageQueue.shift(); return true; } return false; }
-
     lastContent() { return lastMessage.content; }
     lastAuthor() { return lastMessage.author; }
     lastChannel() { return lastMessage.channelId; }
