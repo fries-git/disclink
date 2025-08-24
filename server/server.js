@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { WebSocketServer } from 'ws';
-import { Client, GatewayIntentBits, Partials, ActivityType, TextChannel, WebhookClient } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, ActivityType } from 'discord.js';
 
 const PORT = Number(process.env.PORT || 3001);
 
@@ -117,6 +117,33 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'ack', ref: msg.ref ?? null, ok: true }));
       } catch (e) {
         ws.send(JSON.stringify({ type: 'ack', ref: msg.ref ?? null, ok: false, error: String(e) }));
+      }
+    }
+
+    // --- Get guild + channel list ---
+    if (msg?.type === 'getGuildChannels') {
+      try {
+        const guilds = [];
+        for (const [guildId, guild] of client.guilds.cache) {
+          await guild.channels.fetch(); // make sure cache is filled
+          const channels = guild.channels.cache
+            .filter(c => c.type === 0) // text channels only
+            .map(c => ({ id: c.id, name: c.name }));
+
+          guilds.push({
+            guildId: guild.id,
+            guildName: guild.name,
+            channels
+          });
+        }
+
+        ws.send(JSON.stringify({
+          type: 'guildChannels',
+          ref: msg.ref ?? null,
+          data: guilds
+        }));
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'guildChannels', ref: msg.ref ?? null, error: String(e) }));
       }
     }
   });
