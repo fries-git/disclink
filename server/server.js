@@ -21,12 +21,10 @@ client.on('ready', () => {
 
 async function getChannelName(channel) {
   if (!channel) return null;
-  if (channel.type === 0) return channel.name; // Text channel
-  return null; // Add other types if needed
+  return channel.name ?? null;
 }
 
 client.on('messageCreate', async (msg) => {
-  const channelName = await getChannelName(msg.channel);
   const payload = {
     type: 'messageCreate',
     data: {
@@ -38,7 +36,8 @@ client.on('messageCreate', async (msg) => {
         bot: msg.author?.bot ?? false
       },
       channelId: msg.channel?.id ?? null,
-      channelName,
+      channelName: await getChannelName(msg.channel),
+      channelType: msg.channel?.type ?? null,
       guildId: msg.guild?.id ?? null,
       createdTimestamp: msg.createdTimestamp
     }
@@ -49,7 +48,7 @@ client.on('messageCreate', async (msg) => {
 client.on('error', (err) => console.error('[Discord] Error:', err));
 client.on('shardError', (err) => console.error('[Discord] Shard Error:', err));
 
-// --- WebSocket server setup ---
+// --- WebSocket server ---
 const wss = new WebSocketServer({ port: PORT });
 const sockets = new Set();
 
@@ -75,7 +74,6 @@ wss.on('connection', (ws) => {
         if (!channel || !('send' in channel)) throw new Error('Channel not sendable');
 
         if (username || avatarURL) {
-          // Send via webhook
           const webhooks = await channel.fetchWebhooks();
           let webhook = webhooks.find(w => w.owner?.id === client.user.id);
           if (!webhook) {
@@ -90,7 +88,6 @@ wss.on('connection', (ws) => {
             avatarURL: avatarURL ?? client.user.displayAvatarURL()
           });
         } else {
-          // Normal bot message
           await channel.send(String(content ?? ''));
         }
 
@@ -102,7 +99,7 @@ wss.on('connection', (ws) => {
 
     // --- Set presence ---
     if (msg?.type === 'setPresence') {
-      const { text, kind } = msg; // kind: 'Playing' | 'Listening' | 'Watching' | 'Competing'
+      const { text, kind } = msg;
       const typeMap = {
         Playing: ActivityType.Playing,
         Listening: ActivityType.Listening,
@@ -120,16 +117,17 @@ wss.on('connection', (ws) => {
       }
     }
 
-    // --- Get guild + channel list ---
+    // --- Get guild + channels ---
     if (msg?.type === 'getGuildChannels') {
       try {
         const guilds = [];
         for (const [guildId, guild] of client.guilds.cache) {
-          await guild.channels.fetch(); // make sure cache is filled
-          const channels = guild.channels.cache
-            .filter(c => c.type === 0) // text channels only
-            .map(c => ({ id: c.id, name: c.name }));
-
+          await guild.channels.fetch();
+          const channels = guild.channels.cache.map(c => ({
+            id: c.id,
+            name: c.name,
+            type: c.type
+          }));
           guilds.push({
             guildId: guild.id,
             guildName: guild.name,
@@ -156,9 +154,7 @@ wss.on('connection', (ws) => {
 
 function broadcast(obj) {
   const data = JSON.stringify(obj);
-  for (const ws of sockets) {
-    if (ws.readyState === ws.OPEN) ws.send(data);
-  }
+  for (const ws of sockets) if (ws.readyState === ws.OPEN) ws.send(data);
 }
 
 client.login(process.env.DISCORD_TOKEN).catch((e) => {
