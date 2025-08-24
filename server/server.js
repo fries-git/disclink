@@ -4,13 +4,12 @@ import { Client, GatewayIntentBits, Partials, ActivityType } from 'discord.js';
 
 const PORT = Number(process.env.PORT || 3001);
 
-// --- Discord client setup ---
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel]
 });
 
-let guildChannels = {}; // cached guild info for client queries
+let guildChannels = {}; // cached guild info
 
 client.on('ready', async () => {
   console.log(`[Discord] Logged in as ${client.user.tag}`);
@@ -18,7 +17,11 @@ client.on('ready', async () => {
   broadcast({ type: 'ready', data: { user: { id: client.user.id, tag: client.user.tag } } });
 });
 
-// --- Cache guild + channel info ---
+// --- Normalize names for matching ---
+function normalizeName(str) {
+  return String(str ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 async function cacheGuildChannels() {
   guildChannels = {};
   for (const [guildId, guild] of client.guilds.cache) {
@@ -51,7 +54,6 @@ client.on('messageCreate', async (msg) => {
 client.on('error', (err) => console.error('[Discord] Error:', err));
 client.on('shardError', (err) => console.error('[Discord] Shard Error:', err));
 
-// --- WebSocket server setup ---
 const wss = new WebSocketServer({ port: PORT });
 const sockets = new Set();
 
@@ -65,6 +67,7 @@ wss.on('connection', (ws) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
+    // --- Send message ---
     if (msg?.type === 'sendMessage') {
       const { channelId, content } = msg;
       try {
@@ -77,6 +80,7 @@ wss.on('connection', (ws) => {
       }
     }
 
+    // --- Set presence ---
     if (msg?.type === 'setPresence') {
       const { text, kind } = msg;
       const typeMap = { Playing: ActivityType.Playing, Listening: ActivityType.Listening, Watching: ActivityType.Watching, Competing: ActivityType.Competing };
@@ -88,6 +92,7 @@ wss.on('connection', (ws) => {
       }
     }
 
+    // --- Get guild/channel list ---
     if (msg?.type === 'getGuildChannels') {
       await cacheGuildChannels();
       ws.send(JSON.stringify({ type: 'guildChannels', data: Object.values(guildChannels) }));
