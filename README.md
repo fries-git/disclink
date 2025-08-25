@@ -6,8 +6,8 @@ First thing you need to do is create a bot at https://discord.com/developers and
 
 Next, edit your .env file for your bot token and port. (I believe you'll have to create it I can setup formatting soon but basically create a file named .env in the server folder and add like
 
-BOTTOKEN: (token)  
-Port: (port)
+DISCORD_TOKEN=(token)  
+Port=(port)
 
 You will want to leave the port mostly the same for cloud.)
 
