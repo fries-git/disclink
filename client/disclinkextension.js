@@ -5,9 +5,9 @@
   const ArgumentType = Scratch.ArgumentType;
   const vmRuntime = Scratch.vm?.runtime;
 
-  // ================= CONFIG =================
-  const VERSION = '1.0.0'; // <-- set version here
-  // ==========================================
+  // ========== CONFIG ==========
+  const VERSION = '1.0.0'; // change version here
+  // ============================
 
   let ws = null;
   let connected = false;
@@ -38,24 +38,12 @@
       try{ payload = JSON.parse(evt.data); } catch{return;}
 
       if(payload?.type==='messageCreate' && payload.data){
-        const d = payload.data;
-        lastMessage = {
-          content:String(d.content||''),
-          author:String(d.author?.username||''),
-          channelId:String(d.channelId||''),
-          channelName:String(d.channelName||''),
-          channelType:d.channelType||null,
-          guildId:String(d.guildId||''),
-          bot:!!d.author?.bot,
-          bulkMessages:lastMessage.bulkMessages
-        };
+        lastMessage = { ...payload.data, bulkMessages: lastMessage.bulkMessages };
         messageQueue.push(lastMessage);
         if(vmRuntime) vmRuntime.startHats('discordBridge_whenMessageReceived');
       } else if(payload?.type==='guildChannels' && payload.data){
         guildChannels = {};
-        for(const g of payload.data){
-          guildChannels[g.guildId] = { guildName:g.guildName, channels:g.channels };
-        }
+        for(const g of payload.data) guildChannels[g.guildId] = { guildName:g.guildName, channels:g.channels };
       } else if(payload?.type==='messages' && payload.data){
         lastMessage.bulkMessages = payload.data;
       }
@@ -70,15 +58,10 @@
         color1:'#5865F2',
         color2:'#404EED',
         blocks:[
-          // ===== VERSION =====
           { opcode:'version', blockType:BlockType.REPORTER, text:'version' },
-
-          // ===== CONNECTION =====
           { opcode:'connect', blockType:BlockType.COMMAND, text:'connect to bridge at [URL]', arguments:{ URL:{ type:ArgumentType.STRING, defaultValue:'ws://localhost:3001' } } },
           { opcode:'isConnected', blockType:BlockType.BOOLEAN, text:'connected?' },
           { opcode:'refreshChannels', blockType:BlockType.COMMAND, text:'refresh server + channel list' },
-
-          // ===== MESSAGES =====
           { opcode:'sendMessage', blockType:BlockType.COMMAND, text:'send message [TEXT] to channel [CHANNEL] in server [GUILD]', arguments:{
             TEXT:{ type:ArgumentType.STRING, defaultValue:'Hello!' },
             CHANNEL:{ type:ArgumentType.STRING, defaultValue:'' },
@@ -89,8 +72,6 @@
             CHANNEL:{ type:ArgumentType.STRING, defaultValue:'' },
             GUILD:{ type:ArgumentType.STRING, defaultValue:'' }
           }},
-
-          // ===== GUILDS & CHANNELS =====
           { opcode:'listGuilds', blockType:BlockType.REPORTER, text:'all servers' },
           { opcode:'getGuildId', blockType:BlockType.REPORTER, text:'get server id for [NAME]', arguments:{ NAME:{ type:ArgumentType.STRING, defaultValue:'' } } },
           { opcode:'textChannels', blockType:BlockType.REPORTER, text:'text channels in server [GUILD]', arguments:{ GUILD:{ type:ArgumentType.STRING, defaultValue:'' } } },
@@ -100,8 +81,6 @@
             NAME:{ type:ArgumentType.STRING, defaultValue:'' },
             GUILD:{ type:ArgumentType.STRING, defaultValue:'' }
           }},
-
-          // ===== MESSAGE EVENTS =====
           { opcode:'whenMessageReceived', blockType:BlockType.HAT, text:'when discord message received' },
           { opcode:'lastContent', blockType:BlockType.REPORTER, text:'last msg content' },
           { opcode:'lastAuthor', blockType:BlockType.REPORTER, text:'last msg author' },
@@ -113,19 +92,15 @@
       };
     }
 
-    // ===== CONNECTION =====
     connect(args){ connectWS(String(args.URL||'')); }
     isConnected(){ return connected && ws && ws.readyState===WebSocket.OPEN; }
     refreshChannels(){ if(this.isConnected()) ws.send(safeJSON({ type:'getGuildChannels' })); }
-
-    // ===== VERSION =====
     version(){ return VERSION; }
 
-    // ===== HELPER RESOLVERS =====
     resolveGuildId(nameOrId){
       if(!nameOrId) return '';
       if(Object.keys(guildChannels).length===0) return 'Cache not ready';
-      if(guildChannels[nameOrId]) return nameOrId; // already an ID
+      if(guildChannels[nameOrId]) return nameOrId;
       const g = Object.values(guildChannels).find(x=>x.guildName===nameOrId);
       return g ? g.guildId : '';
     }
@@ -139,7 +114,6 @@
       return ch ? ch.id : '';
     }
 
-    // ===== MESSAGES =====
     sendMessage(args){
       if(!this.isConnected()) return;
       const gid = this.resolveGuildId(args.GUILD);
@@ -156,10 +130,8 @@
       return lastMessage.bulkMessages || '';
     }
 
-    // ===== GUILDS & CHANNELS =====
     listGuilds(){ return Object.values(guildChannels).map(g=>g.guildName).join(', '); }
     getGuildId(args){ return this.resolveGuildId(args.NAME); }
-
     textChannels(args){
       const gid = this.resolveGuildId(args.GUILD);
       if(!gid) return 'Cache not ready';
@@ -167,7 +139,6 @@
       if(!g) return '';
       return g.channels.filter(c=>c.type===0).map(c=>c.name).join(', ');
     }
-
     voiceChannels(args){
       const gid = this.resolveGuildId(args.GUILD);
       if(!gid) return 'Cache not ready';
@@ -175,7 +146,6 @@
       if(!g) return '';
       return g.channels.filter(c=>c.type===2).map(c=>c.name).join(', ');
     }
-
     channelsWithTypes(args){
       const gid = this.resolveGuildId(args.GUILD);
       if(!gid) return 'Cache not ready';
@@ -183,10 +153,8 @@
       if(!g) return '';
       return g.channels.map(c=>`${c.name} (${c.type})`).join(', ');
     }
-
     getChannelId(args){ return this.resolveChannelId(args.GUILD, args.NAME); }
 
-    // ===== MESSAGE EVENTS =====
     whenMessageReceived(){ if(messageQueue.length>0){ messageQueue.shift(); return true; } return false; }
     lastContent(){ return lastMessage.content; }
     lastAuthor(){ return lastMessage.author; }
