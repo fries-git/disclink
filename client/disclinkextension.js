@@ -1,9 +1,9 @@
-(function (Scratch) {
+(function(Scratch){
   'use strict';
 
-  const vmRuntime = Scratch.vm?.runtime;
   const BlockType = Scratch.BlockType;
   const ArgumentType = Scratch.ArgumentType;
+  const vmRuntime = Scratch.vm?.runtime;
 
   let ws = null;
   let connected = false;
@@ -19,31 +19,31 @@
     wsUrl = url||wsUrl;
     ws = new WebSocket(wsUrl);
 
-    ws.addEventListener('open', () => {
+    ws.addEventListener('open', ()=>{
       connected = true;
       ws.send(safeJSON({ type:'getGuildChannels' }));
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', ()=>{
       connected = false;
       setTimeout(()=>connectWS(wsUrl),1500);
     });
 
-    ws.addEventListener('message', (evt)=>{
+    ws.addEventListener('message', evt=>{
       let payload;
-      try{ payload = JSON.parse(evt.data); }catch{return;}
+      try{ payload = JSON.parse(evt.data); } catch{return;}
 
       if(payload?.type==='messageCreate' && payload.data){
         const d = payload.data;
         lastMessage = {
-          content: String(d.content||''),
-          author: String(d.author?.username||''),
-          channelId: String(d.channelId||''),
-          channelName: String(d.channelName||''),
-          channelType: d.channelType||null,
-          guildId: String(d.guildId||''),
-          bot: !!d.author?.bot,
-          bulkMessages: lastMessage.bulkMessages
+          content:String(d.content||''),
+          author:String(d.author?.username||''),
+          channelId:String(d.channelId||''),
+          channelName:String(d.channelName||''),
+          channelType:d.channelType||null,
+          guildId:String(d.guildId||''),
+          bot:!!d.author?.bot,
+          bulkMessages:lastMessage.bulkMessages
         };
         messageQueue.push(lastMessage);
         if(vmRuntime) vmRuntime.startHats('discordBridge_whenMessageReceived');
@@ -69,7 +69,7 @@
           { opcode:'connect', blockType:BlockType.COMMAND, text:'connect to bridge at [URL]', arguments:{ URL:{ type:ArgumentType.STRING, defaultValue:'ws://localhost:3001' } } },
           { opcode:'isConnected', blockType:BlockType.BOOLEAN, text:'connected?' },
 
-          // Message sending
+          // Message blocks
           { opcode:'sendMessage', blockType:BlockType.COMMAND, text:'send message [TEXT] to channel [CHANNEL] in server [GUILD]', arguments:{
             TEXT:{ type:ArgumentType.STRING, defaultValue:'Hello!' },
             CHANNEL:{ type:ArgumentType.STRING, defaultValue:'' },
@@ -80,10 +80,9 @@
             CHANNEL:{ type:ArgumentType.STRING, defaultValue:'' },
             GUILD:{ type:ArgumentType.STRING, defaultValue:'' }
           }},
-
           { opcode:'refreshChannels', blockType:BlockType.COMMAND, text:'refresh server + channel list' },
 
-          // Guild & channel helpers
+          // Guild/channel helpers
           { opcode:'listGuilds', blockType:BlockType.REPORTER, text:'all servers' },
           { opcode:'getGuildId', blockType:BlockType.REPORTER, text:'get server id for [NAME]', arguments:{ NAME:{ type:ArgumentType.STRING, defaultValue:'' } } },
           { opcode:'textChannels', blockType:BlockType.REPORTER, text:'text channels in server [GUILD]', arguments:{ GUILD:{ type:ArgumentType.STRING, defaultValue:'' } } },
@@ -112,40 +111,44 @@
     refreshChannels(){ if(this.isConnected()) ws.send(safeJSON({ type:'getGuildChannels' })); }
 
     resolveGuildId(nameOrId){
-      if(guildChannels[nameOrId]) return nameOrId;
+      if(!nameOrId) return '';
+      if(guildChannels[nameOrId]) return nameOrId; // already an ID
       const g = Object.values(guildChannels).find(x=>x.guildName===nameOrId);
       return g ? g.guildId : '';
     }
 
-    resolveChannelId(guildIdOrName, channelNameOrId){
-      const gid = this.resolveGuildId(guildIdOrName);
+    resolveChannelId(guildInput, channelInput){
+      const gid = this.resolveGuildId(guildInput);
+      if(!gid || !channelInput) return '';
       const g = guildChannels[gid];
-      if(!g || !channelNameOrId) return '';
-      const ch = g.channels.find(c=>c.id===channelNameOrId || c.name.toLowerCase()===channelNameOrId.toLowerCase());
+      if(!g) return '';
+      const ch = g.channels.find(c=>c.id===channelInput || c.name.toLowerCase()===channelInput.toLowerCase());
       return ch ? ch.id : '';
     }
 
     sendMessage(args){
       if(!this.isConnected()) return;
-      const channelId = this.resolveChannelId(args.GUILD, args.CHANNEL);
-      if(!channelId) return;
+      const gid = this.resolveGuildId(args.GUILD);
+      const cid = this.resolveChannelId(args.GUILD, args.CHANNEL);
+      if(!gid || !cid) return;
       ws.send(safeJSON({
         type:'sendMessage',
         ref: Math.random().toString(36).slice(2),
-        guildId: this.resolveGuildId(args.GUILD),
-        channelId,
+        guildId: gid,
+        channelId: cid,
         content: String(args.TEXT||'')
       }));
     }
 
     getMessages(args){
       if(!this.isConnected()) return '';
-      const channelId = this.resolveChannelId(args.GUILD, args.CHANNEL);
-      if(!channelId) return '';
+      const gid = this.resolveGuildId(args.GUILD);
+      const cid = this.resolveChannelId(args.GUILD, args.CHANNEL);
+      if(!gid || !cid) return '';
       ws.send(safeJSON({
         type:'getMessages',
         ref: Math.random().toString(36).slice(2),
-        channelId,
+        channelId: cid,
         limit: Number(args.LIMIT) || 50
       }));
       return lastMessage.bulkMessages || '';
