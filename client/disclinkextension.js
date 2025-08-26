@@ -6,9 +6,8 @@
   const ArgumentType = Scratch.ArgumentType;
 
   // ================= CONFIG =================
-  const VERSION = '1.3.0'; // <-- edit here to update version
-  const SERVER_DELIM = '␞'; // between servers
-  const MSG_DELIM = '␟';    // between messages
+  const VERSION = '1.4.0'; // updated version
+  const MSG_DELIM = '␟';   // delimiter between messages
   // ==========================================
 
   let ws = null;
@@ -26,7 +25,6 @@
     bot: false,
     bulkMessages: ''
   };
-  let webhooks = {}; // guildId -> webhook info (created on-demand)
 
   function safeJSON(obj) { try { return JSON.stringify(obj); } catch { return '{}'; } }
 
@@ -49,7 +47,7 @@
       let payload;
       try { payload = JSON.parse(evt.data); } catch { return; }
 
-      // incoming single message
+      // Single message
       if (payload?.type === 'messageCreate' && payload.data) {
         const d = payload.data;
         lastMessage = {
@@ -64,10 +62,9 @@
         };
         messageQueue.push(lastMessage);
         if (vmRuntime) vmRuntime.startHats('discordBridge_whenMessageReceived');
-        return;
       }
 
-      // guild channels
+      // Guild channels
       if (payload?.type === 'guildChannels' && Array.isArray(payload.data)) {
         guildChannels = {};
         for (const g of payload.data) {
@@ -77,26 +74,22 @@
             channels: Array.isArray(g.channels) ? g.channels : []
           };
         }
-        return;
       }
 
-      // bulk messages
-      if (payload?.type === 'messages') {
-        const d = payload.data;
-        if (Array.isArray(d)) {
-          const mapped = d.map(item => {
-            const chName = item.channelName ?? '';
-            const author = (item.author && (item.author.username ?? item.author.name)) ? (item.author.username ?? item.author.name) : '';
-            const content = (item.content ?? '').toString().replace(/\r?\n/g, ' ');
-            return `#${chName} - ${author}: ${content}`;
-          });
-          lastMessage.bulkMessages = mapped.join(MSG_DELIM);
-        } else lastMessage.bulkMessages = '';
+      // Bulk messages
+      if (payload?.type === 'messages' && Array.isArray(payload.data)) {
+        const mapped = payload.data.map(item => {
+          const chName = item.channelName ?? '';
+          const author = (item.author && (item.author.username ?? item.author.name)) ? (item.author.username ?? item.author.name) : '';
+          const content = (item.content ?? '').toString().replace(/\r?\n/g, ' ');
+          return `#${chName} - ${author}: ${content}`;
+        });
+        lastMessage.bulkMessages = mapped.join(MSG_DELIM);
       }
     });
   }
 
-  // helpers
+  // === Helpers ===
   function resolveGuildId(nameOrId) {
     if (!nameOrId) return '';
     if (!guildChannels) return '';
@@ -163,58 +156,54 @@
     isConnected() { return connected && ws && ws.readyState === WebSocket.OPEN; }
     refreshChannels() { if (this.isConnected()) ws.send(safeJSON({ type: 'getGuildChannels' })); }
 
-    // --- guild/channel helpers ---
-    listGuilds() { return Object.values(guildChannels).map(g => g.guildName).join(SERVER_DELIM); }
-    allServerNames() { return Object.values(guildChannels).map(g => g.guildName).join(SERVER_DELIM); }
-    allServerIds() { return Object.keys(guildChannels).join(SERVER_DELIM); }
+    listGuilds() { return Object.values(guildChannels).map(g => g.guildName).join(MSG_DELIM); }
+    allServerNames() { return Object.values(guildChannels).map(g => g.guildName).join(MSG_DELIM); }
+    allServerIds() { return Object.keys(guildChannels).join(MSG_DELIM); }
     getGuildId(args) { return resolveGuildId(args.NAME); }
 
     textChannels(args) {
-      const gid = resolveGuildId(args.GUILD);
+      const gid = resolveGuildId(args.GUILD); if (!gid) return '';
       const g = guildChannels[gid]; if (!g) return '';
-      return g.channels.filter(c => c.type === 0).map(c => c.name).join(SERVER_DELIM);
+      return g.channels.filter(c => c.type === 0).map(c => c.name).join(MSG_DELIM);
     }
+
     voiceChannels(args) {
-      const gid = resolveGuildId(args.GUILD);
+      const gid = resolveGuildId(args.GUILD); if (!gid) return '';
       const g = guildChannels[gid]; if (!g) return '';
-      return g.channels.filter(c => c.type === 2).map(c => c.name).join(SERVER_DELIM);
+      return g.channels.filter(c => c.type === 2).map(c => c.name).join(MSG_DELIM);
     }
+
     channelsWithTypes(args) {
-      const gid = resolveGuildId(args.GUILD);
+      const gid = resolveGuildId(args.GUILD); if (!gid) return '';
       const g = guildChannels[gid]; if (!g) return '';
-      return g.channels.map(c => `${c.name} (${c.type})`).join(SERVER_DELIM);
+      return g.channels.map(c => `${c.name} (${c.type})`).join(MSG_DELIM);
     }
+
     getChannelId(args) { return resolveChannelId(args.GUILD, args.NAME); }
 
-    // --- send message with username (webhook) ---
     sendMessage(args) {
       if (!this.isConnected()) return;
-      const gid = resolveGuildId(args.GUILD);
-      if (!gid) return;
-
-      const chId = resolveChannelId(args.GUILD, args.CHANNEL);
-      if (!chId) return;
+      const gid = resolveGuildId(args.GUILD); if (!gid) return;
+      const chId = resolveChannelId(args.GUILD, args.CHANNEL); if (!chId) return;
 
       ws.send(safeJSON({ type: 'sendMessage', channelId: chId, guildId: gid, content: String(args.TEXT ?? ''), username: String(args.USERNAME ?? '') }));
     }
 
-    // --- get last X messages (waits) ---
     getMessages(args) {
-      if (!this.isConnected()) return '';
       const gid = resolveGuildId(args.GUILD); if (!gid) return '';
       const chId = resolveChannelId(args.GUILD, args.CHANNEL); if (!chId) return '';
       const limit = Math.min(Math.max(Number(args.LIMIT) || 50, 1), 250);
 
+      lastMessage.bulkMessages = '';
       ws.send(safeJSON({ type: 'getMessages', guildId: gid, channelId: chId, limit }));
-      // wait until lastMessage.bulkMessages is updated
+
       const start = Date.now();
-      while (Date.now() - start < 15000) { // max wait 15s
+      while (Date.now() - start < 15000) { // max 15s wait
         if (lastMessage.bulkMessages) break;
       }
       return lastMessage.bulkMessages;
     }
 
-    // --- message blocks ---
     whenMessageReceived() { if (messageQueue.length > 0) { messageQueue.shift(); return true; } return false; }
     lastContent() { return lastMessage.content; }
     lastAuthor() { return lastMessage.author; }
