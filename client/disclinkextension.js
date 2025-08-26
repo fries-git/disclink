@@ -8,12 +8,11 @@
   let ws = null;
   let connected = false;
   let wsUrl = 'ws://localhost:3001';
-
-  let guildChannels = {}; // guildId -> { guildName, channels: [{id,name,type}] }
+  let guildChannels = {};
   const messageQueue = [];
   let lastMessage = { content:'', author:'', channelId:'', channelName:'', channelType:null, guildId:'', bot:false, bulkMessages:'' };
 
-  function safeJSON(obj){ try{ return JSON.stringify(obj); } catch { return '{}'; } }
+  function safeJSON(obj){ try{ return JSON.stringify(obj); } catch{return '{}'; } }
 
   function connectWS(url){
     if(ws && (ws.readyState===WebSocket.OPEN || ws.readyState===WebSocket.CONNECTING)) return;
@@ -32,19 +31,19 @@
 
     ws.addEventListener('message', (evt)=>{
       let payload;
-      try { payload = JSON.parse(evt.data); } catch{return;}
+      try{ payload = JSON.parse(evt.data); }catch{return;}
 
       if(payload?.type==='messageCreate' && payload.data){
         const d = payload.data;
         lastMessage = {
-          content:String(d.content||''),
-          author:String(d.author?.username||''),
-          channelId:String(d.channelId||''),
-          channelName:String(d.channelName||''),
-          channelType:d.channelType||null,
-          guildId:String(d.guildId||''),
-          bot:!!d.author?.bot,
-          bulkMessages:lastMessage.bulkMessages
+          content: String(d.content||''),
+          author: String(d.author?.username||''),
+          channelId: String(d.channelId||''),
+          channelName: String(d.channelName||''),
+          channelType: d.channelType||null,
+          guildId: String(d.guildId||''),
+          bot: !!d.author?.bot,
+          bulkMessages: lastMessage.bulkMessages
         };
         messageQueue.push(lastMessage);
         if(vmRuntime) vmRuntime.startHats('discordBridge_whenMessageReceived');
@@ -70,14 +69,23 @@
           { opcode:'connect', blockType:BlockType.COMMAND, text:'connect to bridge at [URL]', arguments:{ URL:{ type:ArgumentType.STRING, defaultValue:'ws://localhost:3001' } } },
           { opcode:'isConnected', blockType:BlockType.BOOLEAN, text:'connected?' },
 
+          // Message sending
           { opcode:'sendMessage', blockType:BlockType.COMMAND, text:'send message [TEXT] to channel [CHANNEL] in server [GUILD]', arguments:{
             TEXT:{ type:ArgumentType.STRING, defaultValue:'Hello!' },
             CHANNEL:{ type:ArgumentType.STRING, defaultValue:'' },
             GUILD:{ type:ArgumentType.STRING, defaultValue:'' }
           }},
+          { opcode:'getMessages', blockType:BlockType.REPORTER, text:'get last [LIMIT] messages from channel [CHANNEL] in server [GUILD]', arguments:{
+            LIMIT:{ type:ArgumentType.NUMBER, defaultValue:50 },
+            CHANNEL:{ type:ArgumentType.STRING, defaultValue:'' },
+            GUILD:{ type:ArgumentType.STRING, defaultValue:'' }
+          }},
+
           { opcode:'refreshChannels', blockType:BlockType.COMMAND, text:'refresh server + channel list' },
 
+          // Guild & channel helpers
           { opcode:'listGuilds', blockType:BlockType.REPORTER, text:'all servers' },
+          { opcode:'getGuildId', blockType:BlockType.REPORTER, text:'get server id for [NAME]', arguments:{ NAME:{ type:ArgumentType.STRING, defaultValue:'' } } },
           { opcode:'textChannels', blockType:BlockType.REPORTER, text:'text channels in server [GUILD]', arguments:{ GUILD:{ type:ArgumentType.STRING, defaultValue:'' } } },
           { opcode:'voiceChannels', blockType:BlockType.REPORTER, text:'voice channels in server [GUILD]', arguments:{ GUILD:{ type:ArgumentType.STRING, defaultValue:'' } } },
           { opcode:'channelsWithTypes', blockType:BlockType.REPORTER, text:'all channels with types in server [GUILD]', arguments:{ GUILD:{ type:ArgumentType.STRING, defaultValue:'' } } },
@@ -86,19 +94,14 @@
             GUILD:{ type:ArgumentType.STRING, defaultValue:'' }
           }},
 
+          // Message events
           { opcode:'whenMessageReceived', blockType:BlockType.HAT, text:'when discord message received' },
           { opcode:'lastContent', blockType:BlockType.REPORTER, text:'last msg content' },
           { opcode:'lastAuthor', blockType:BlockType.REPORTER, text:'last msg author' },
           { opcode:'lastChannel', blockType:BlockType.REPORTER, text:'last msg channel id' },
           { opcode:'lastChannelName', blockType:BlockType.REPORTER, text:'last msg channel name' },
           { opcode:'lastChannelType', blockType:BlockType.REPORTER, text:'last msg channel type' },
-          { opcode:'lastGuild', blockType:BlockType.REPORTER, text:'last msg guild id' },
-
-          { opcode:'getMessages', blockType:BlockType.REPORTER, text:'get last [LIMIT] messages from channel [CHANNEL] in server [GUILD]', arguments:{
-            LIMIT:{ type:ArgumentType.NUMBER, defaultValue:50 },
-            CHANNEL:{ type:ArgumentType.STRING, defaultValue:'' },
-            GUILD:{ type:ArgumentType.STRING, defaultValue:'' }
-          }}
+          { opcode:'lastGuild', blockType:BlockType.REPORTER, text:'last msg guild id' }
         ]
       };
     }
@@ -108,12 +111,17 @@
 
     refreshChannels(){ if(this.isConnected()) ws.send(safeJSON({ type:'getGuildChannels' })); }
 
-    resolveChannelId(guildInput, channelInput){
-      // Resolve guild by ID or name
-      let g = guildChannels[guildInput] || Object.values(guildChannels).find(x=>x.guildName===guildInput);
-      if(!g || !channelInput) return '';
-      // Resolve channel by ID or name
-      const ch = g.channels.find(c=>c.id===channelInput || c.name.toLowerCase()===String(channelInput).toLowerCase());
+    resolveGuildId(nameOrId){
+      if(guildChannels[nameOrId]) return nameOrId;
+      const g = Object.values(guildChannels).find(x=>x.guildName===nameOrId);
+      return g ? g.guildId : '';
+    }
+
+    resolveChannelId(guildIdOrName, channelNameOrId){
+      const gid = this.resolveGuildId(guildIdOrName);
+      const g = guildChannels[gid];
+      if(!g || !channelNameOrId) return '';
+      const ch = g.channels.find(c=>c.id===channelNameOrId || c.name.toLowerCase()===channelNameOrId.toLowerCase());
       return ch ? ch.id : '';
     }
 
@@ -124,28 +132,45 @@
       ws.send(safeJSON({
         type:'sendMessage',
         ref: Math.random().toString(36).slice(2),
-        guildId:String(args.GUILD||''),
+        guildId: this.resolveGuildId(args.GUILD),
         channelId,
-        content:String(args.TEXT||'')
+        content: String(args.TEXT||'')
       }));
     }
 
+    getMessages(args){
+      if(!this.isConnected()) return '';
+      const channelId = this.resolveChannelId(args.GUILD, args.CHANNEL);
+      if(!channelId) return '';
+      ws.send(safeJSON({
+        type:'getMessages',
+        ref: Math.random().toString(36).slice(2),
+        channelId,
+        limit: Number(args.LIMIT) || 50
+      }));
+      return lastMessage.bulkMessages || '';
+    }
+
     listGuilds(){ return Object.values(guildChannels).map(g=>g.guildName).join(', '); }
+    getGuildId(args){ return this.resolveGuildId(args.NAME); }
 
     textChannels(args){
-      const g = guildChannels[args.GUILD] || Object.values(guildChannels).find(x=>x.guildName===args.GUILD);
+      const gid = this.resolveGuildId(args.GUILD);
+      const g = guildChannels[gid];
       if(!g) return '';
       return g.channels.filter(c=>c.type===0).map(c=>c.name).join(', ');
     }
 
     voiceChannels(args){
-      const g = guildChannels[args.GUILD] || Object.values(guildChannels).find(x=>x.guildName===args.GUILD);
+      const gid = this.resolveGuildId(args.GUILD);
+      const g = guildChannels[gid];
       if(!g) return '';
       return g.channels.filter(c=>c.type===2).map(c=>c.name).join(', ');
     }
 
     channelsWithTypes(args){
-      const g = guildChannels[args.GUILD] || Object.values(guildChannels).find(x=>x.guildName===args.GUILD);
+      const gid = this.resolveGuildId(args.GUILD);
+      const g = guildChannels[gid];
       if(!g) return '';
       return g.channels.map(c=>`${c.name} (${c.type})`).join(', ');
     }
@@ -159,8 +184,6 @@
     lastChannelName(){ return lastMessage.channelName; }
     lastChannelType(){ return lastMessage.channelType; }
     lastGuild(){ return lastMessage.guildId; }
-
-    getMessages(){ return lastMessage.bulkMessages||''; }
   }
 
   if(vmRuntime && !vmRuntime._hats) vmRuntime._hats={};
