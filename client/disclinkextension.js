@@ -108,10 +108,12 @@
 
     refreshChannels(){ if(this.isConnected()) ws.send(safeJSON({ type:'getGuildChannels' })); }
 
-    resolveChannelId(guildNameOrId, channelNameOrId){
-      const g = guildChannels[guildNameOrId] || Object.values(guildChannels).find(x=>x.guildName===guildNameOrId);
-      if(!g || !channelNameOrId) return '';
-      const ch = g.channels.find(c=>c.id===channelNameOrId || c.name.toLowerCase()===String(channelNameOrId).toLowerCase());
+    resolveChannelId(guildInput, channelInput){
+      // Resolve guild by ID or name
+      let g = guildChannels[guildInput] || Object.values(guildChannels).find(x=>x.guildName===guildInput);
+      if(!g || !channelInput) return '';
+      // Resolve channel by ID or name
+      const ch = g.channels.find(c=>c.id===channelInput || c.name.toLowerCase()===String(channelInput).toLowerCase());
       return ch ? ch.id : '';
     }
 
@@ -119,10 +121,9 @@
       if(!this.isConnected()) return;
       const channelId = this.resolveChannelId(args.GUILD, args.CHANNEL);
       if(!channelId) return;
-      const ref = Math.random().toString(36).slice(2);
       ws.send(safeJSON({
         type:'sendMessage',
-        ref,
+        ref: Math.random().toString(36).slice(2),
         guildId:String(args.GUILD||''),
         channelId,
         content:String(args.TEXT||'')
