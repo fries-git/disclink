@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { WebSocketServer } from 'ws';
-import { Client, GatewayIntentBits, Partials } from 'discord.js';
+import { Client, GatewayIntentBits, Partials } from 'discord.js-selfbot-v13';
 
 const PORT = Number(process.env.PORT || 3001);
 
