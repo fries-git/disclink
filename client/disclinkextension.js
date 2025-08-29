@@ -7,7 +7,7 @@ const PORT = Number(process.env.PORT || 3001);
 const client = new Client({
   partials: [Partials.Channel]
 });
-
+  
 const sockets = new Set();
 
 async function sendGuildChannels(ws) {
