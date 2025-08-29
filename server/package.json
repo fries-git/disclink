@@ -2,13 +2,15 @@
   "name": "discord-turbowarp-bridge",
   "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
+  "main": "index.js",
+  "description": "A WebSocket bridge for Discord self-bot and TurboWarp integration",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "discord.js-selfbot-v13": "^14.15.3",
+    "discord.js-selfbot-v13": "^3.2.0",
     "dotenv": "^16.4.5",
     "ws": "^8.18.0"
-  }
+  },
+  "license": "MIT"
 }
