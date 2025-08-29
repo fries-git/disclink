@@ -77,8 +77,29 @@
                     { opcode: 'isConnected', blockType: BlockType.BOOLEAN, text: 'connected?' },
 
                     // Send message blocks
-                    { opcode: 'sendMessage', blockType: BlockType.COMMAND, text: 'send message [TEXT] to channel [CHANNEL]', arguments: { TEXT: { type: ArgumentType.STRING, defaultValue: 'Hello!' }, CHANNEL: { type: ArgumentType.STRING, defaultValue: '1234567890' } } },
-                    { opcode: 'sendMessageByName', blockType: BlockType.COMMAND, text: 'send [TEXT] to [CHANNEL] in server [GUILD]', arguments: { TEXT: { type: ArgumentType.STRING, defaultValue: 'Hello!' }, CHANNEL: { type: ArgumentType.STRING, defaultValue: 'general' }, GUILD: { type: ArgumentType.STRING, defaultValue: '' } } },
+                    {
+                        opcode: 'sendMessage',
+                        blockType: BlockType.COMMAND,
+                        text: 'send message [TEXT] to channel [CHANNEL] as [USERNAME] with avatar [AVATAR]',
+                        arguments: {
+                            TEXT: { type: ArgumentType.STRING, defaultValue: 'Hello!' },
+                            CHANNEL: { type: ArgumentType.STRING, defaultValue: '1234567890' },
+                            USERNAME: { type: ArgumentType.STRING, defaultValue: '' },
+                            AVATAR: { type: ArgumentType.STRING, defaultValue: '' }
+                        }
+                    },
+                    {
+                        opcode: 'sendMessageByName',
+                        blockType: BlockType.COMMAND,
+                        text: 'send [TEXT] to [CHANNEL] in server [GUILD] as [USERNAME] with avatar [AVATAR]',
+                        arguments: {
+                            TEXT: { type: ArgumentType.STRING, defaultValue: 'Hello!' },
+                            CHANNEL: { type: ArgumentType.STRING, defaultValue: 'general' },
+                            GUILD: { type: ArgumentType.STRING, defaultValue: '' },
+                            USERNAME: { type: ArgumentType.STRING, defaultValue: '' },
+                            AVATAR: { type: ArgumentType.STRING, defaultValue: '' }
+                        }
+                    },
 
                     { opcode: 'refreshChannels', blockType: BlockType.COMMAND, text: 'refresh server + channel list' },
 
@@ -104,7 +125,13 @@
         connect(args) { connectWS(String(args.URL || '')); }
         isConnected() { return connected && ws && ws.readyState === WebSocket.OPEN; }
 
-        // Send by ID (existing)
+        // Helper: find guild by name or ID
+        resolveGuild(guildArg) {
+            if (!guildArg) return null;
+            if (guildChannels[guildArg]) return guildChannels[guildArg];
+            return Object.values(guildChannels).find(g => g.guildName.toLowerCase() === String(guildArg).toLowerCase()) || null;
+        }
+
         sendMessage(args) {
             if (!this.isConnected()) return;
             const channelId = String(args.CHANNEL ?? '');
@@ -113,63 +140,61 @@
                 type: 'sendMessage',
                 ref: Math.random().toString(36).slice(2),
                 channelId,
-                content: String(args.TEXT ?? '')
+                content: String(args.TEXT ?? ''),
+                username: String(args.USERNAME ?? ''),
+                avatarURL: String(args.AVATAR ?? '')
             }));
         }
 
-        // Send by server+channel name (new)
         sendMessageByName(args) {
             if (!this.isConnected()) return;
 
-            let channelId = '';
-            const guild = String(args.GUILD || '');
+            const guild = this.resolveGuild(String(args.GUILD || ''));
+            if (!guild) return;
+
             const channelName = String(args.CHANNEL || '');
-
-            if (guild && channelName) {
-                const g = Object.values(guildChannels).find(gv => gv.guildName.toLowerCase() === guild.toLowerCase());
-                if (g) {
-                    const ch = g.channels.find(c => c.name.toLowerCase() === channelName.toLowerCase());
-                    if (ch) channelId = ch.id;
-                }
-            }
-
-            if (!channelId) return;
+            const ch = guild.channels.find(c => c.name.toLowerCase() === channelName.toLowerCase());
+            if (!ch) return;
 
             ws.send(safeJSON({
                 type: 'sendMessage',
                 ref: Math.random().toString(36).slice(2),
-                channelId,
-                content: String(args.TEXT ?? '')
+                channelId: ch.id,
+                content: String(args.TEXT ?? ''),
+                username: String(args.USERNAME ?? ''),
+                avatarURL: String(args.AVATAR ?? '')
             }));
         }
 
         refreshChannels() { if (this.isConnected()) ws.send(safeJSON({ type: 'getGuildChannels' })); }
 
-        // Guild / Channel helpers
         listGuilds() { return Object.values(guildChannels).map(g => g.guildName).join(', '); }
 
         textChannels(args) {
-            const g = guildChannels[args.GUILD]; if (!g) return '';
+            const g = this.resolveGuild(args.GUILD);
+            if (!g) return '';
             return g.channels.filter(c => c.type === 0).map(c => c.name).join(', ');
         }
 
         voiceChannels(args) {
-            const g = guildChannels[args.GUILD]; if (!g) return '';
+            const g = this.resolveGuild(args.GUILD);
+            if (!g) return '';
             return g.channels.filter(c => c.type === 2).map(c => c.name).join(', ');
         }
 
         channelsWithTypes(args) {
-            const g = guildChannels[args.GUILD]; if (!g) return '';
+            const g = this.resolveGuild(args.GUILD);
+            if (!g) return '';
             return g.channels.map(c => `${c.name} (${c.type})`).join(', ');
         }
 
         getChannelId(args) {
-            const g = guildChannels[args.GUILD]; if (!g) return '';
+            const g = this.resolveGuild(args.GUILD);
+            if (!g) return '';
             const ch = g.channels.find(c => c.name.toLowerCase() === String(args.NAME || '').toLowerCase());
             return ch ? ch.id : '';
         }
 
-        // Message blocks
         whenMessageReceived() { if (messageQueue.length > 0) { messageQueue.shift(); return true; } return false; }
         lastContent() { return lastMessage.content; }
         lastAuthor() { return lastMessage.author; }
