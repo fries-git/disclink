@@ -1,19 +1,28 @@
+// server.cjs
 require("dotenv").config();
 const WebSocket = require("ws");
-const { Client } = require("discord.js-selfbot-v13");
+const { Client, Intents } = require("discord.js-selfbot-v13");
 
+// --- PORT ---
 const PORT = Number(process.env.PORT);
 if (!PORT) {
   console.error("PORT environment variable not set. Exiting.");
   process.exit(1);
 }
 
-// Discord client
-const client = new Client();
+// --- Discord Client ---
+const client = new Client({
+  intents: [
+    Intents.FLAGS.GUILDS,
+    Intents.FLAGS.GUILD_MESSAGES,
+    Intents.FLAGS.MESSAGE_CONTENT
+  ]
+});
+
 const cache = { ready: false, servers: [] };
 let sockets = [];
 
-// --- Helper: broadcast to all WS clients ---
+// --- Broadcast helper ---
 function broadcast(obj) {
   const msg = JSON.stringify(obj);
   sockets.forEach(ws => {
@@ -28,15 +37,18 @@ async function refreshCache() {
 
   for (const [guildId, guild] of client.guilds.cache) {
     try {
-      await guild.channels.fetch();
+      await guild.channels.fetch(); // fetch channels
       const textChannels = guild.channels.cache
-        .filter(ch => ch.type === 'text')
+        .filter(ch => typeof ch.isText === 'function' && ch.isText())
         .map(ch => ({ id: ch.id, name: ch.name }));
 
-      cache.servers.push({ id: guild.id, name: guild.name, channels: textChannels });
-      console.log(`[Discord] Cached guild: ${guild.name} (${textChannels.length} channels)`);
+      cache.servers.push({
+        id: guild.id,
+        name: guild.name,
+        channels: textChannels
+      });
 
-      // Broadcast partial server list as it comes
+      console.log(`[Discord] Cached guild: ${guild.name} (${textChannels.length} channels)`);
       broadcast({ type: "serverPartial", guild: { id: guild.id, name: guild.name, channels: textChannels } });
     } catch (err) {
       console.error(`[Discord] Failed to fetch channels for ${guild.name}:`, err);
@@ -62,7 +74,7 @@ async function sendMessageToDiscord(serverName, channelName, text) {
     const guild = client.guilds.cache.find(g => g.name === serverName || g.id === serverName);
     if (!guild) return console.log(`[Discord] Server not found: ${serverName}`);
 
-    const channel = guild.channels.cache.find(c => (c.name === channelName || c.id === channelName) && c.type === 'text');
+    const channel = guild.channels.cache.find(c => (c.name === channelName || c.id === channelName) && typeof c.isText === 'function' && c.isText());
     if (!channel) return console.log(`[Discord] Channel not found in ${serverName}: ${channelName}`);
 
     await channel.send(text);
@@ -93,10 +105,12 @@ wss.on("connection", ws => {
         case "refreshServers":
           await refreshCache();
           break;
+
         case "getChannels":
           const guild = cache.servers.find(s => s.id === msg.guildId || s.name === msg.guildId);
           if (guild) ws.send(JSON.stringify({ type: "channelList", guildId: guild.id, data: guild.channels }));
           break;
+
         case "sendMessage":
           await sendMessageToDiscord(msg.server, msg.channel, msg.text);
           break;
@@ -129,11 +143,11 @@ client.on("messageCreate", msg => {
   broadcast(payload);
 });
 
-// --- Discord login ---
+// --- Login ---
 client.login(process.env.TOKEN)
   .then(() => {
     console.log(`[Discord] Logged in as ${client.user.username}`);
-    refreshCache(); // fetch servers/channels after login
+    refreshCache();
   })
   .catch(err => {
     console.error("[Discord] Login failed:", err);
