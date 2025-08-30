@@ -1,6 +1,6 @@
-import 'dotenv/config';
-import { Client, GatewayIntentBits, Partials } from 'discord.js';
-import { WebSocketServer } from 'ws';
+require('dotenv').config();
+const { WebSocketServer } = require('ws');
+const { Client, GatewayIntentBits, Partials } = require('discord.js');
 
 const PORT = Number(process.env.PORT || 3001);
 const client = new Client({
@@ -10,7 +10,6 @@ const client = new Client({
 
 const sockets = new Set();
 
-// Send full guild + channel info to a specific WS client
 async function sendGuildChannels(ws) {
   try {
     const guilds = [];
@@ -25,7 +24,6 @@ async function sendGuildChannels(ws) {
   }
 }
 
-// Broadcast guildChannels to all WS clients
 function broadcastGuildChannels() {
   for (const ws of sockets) {
     if (ws.readyState === ws.OPEN) sendGuildChannels(ws);
@@ -34,7 +32,7 @@ function broadcastGuildChannels() {
 
 client.on('ready', () => {
   console.log(`[Discord] Logged in as ${client.user.tag}`);
-  broadcastGuildChannels(); // Send initial data to all connected clients
+  broadcastGuildChannels();
 });
 
 client.on('messageCreate', msg => {
@@ -61,7 +59,7 @@ wss.on('connection', async ws => {
   console.log('[WS] Client connected');
 
   ws.send(JSON.stringify({ type: 'bridgeStatus' }));
-  await sendGuildChannels(ws); // Send initial server/channel info
+  await sendGuildChannels(ws);
 
   ws.on('message', async raw => {
     let msg;

@@ -14,14 +14,38 @@ class DiscordLink {
       name: 'Discord Link',
       color1: '#7289DA',
       blocks: [
-        { opcode: 'connect', blockType: 'command', text: 'connect to bridge [URL]', arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } } },
+        {
+          opcode: 'connect',
+          blockType: 'command',
+          text: 'connect to bridge [URL]',
+          arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } }
+        },
         { opcode: 'isConnected', blockType: 'Boolean', text: 'bridge connected?' },
         { opcode: 'isDiscordReady', blockType: 'Boolean', text: 'discord ready?' },
         { opcode: 'getGuilds', blockType: 'reporter', text: 'server list' },
-        { opcode: 'getChannels', blockType: 'reporter', text: 'channels in server [SERVER]', arguments: { SERVER: { type: 'string', defaultValue: '' } } },
-        { opcode: 'refreshServers', blockType: 'command', text: 'refresh servers' },
-        { opcode: 'refreshChannels', blockType: 'command', text: 'refresh channels for server [SERVER]', arguments: { SERVER: { type: 'string', defaultValue: '' } } },
-        { opcode: 'mentionUser', blockType: 'reporter', text: 'mention user [ID]', arguments: { ID: { type: 'string', defaultValue: '1234567890' } } }
+        {
+          opcode: 'getChannels',
+          blockType: 'reporter',
+          text: 'channels in server [SERVER]',
+          arguments: { SERVER: { type: 'string', defaultValue: '' } }
+        },
+        {
+          opcode: 'refreshServers',
+          blockType: 'command',
+          text: 'refresh servers'
+        },
+        {
+          opcode: 'refreshChannels',
+          blockType: 'command',
+          text: 'refresh channels for server [SERVER]',
+          arguments: { SERVER: { type: 'string', defaultValue: '' } }
+        },
+        {
+          opcode: 'mentionUser',
+          blockType: 'reporter',
+          text: 'mention user [ID]',
+          arguments: { ID: { type: 'string', defaultValue: '1234567890' } }
+        }
       ]
     };
   }
@@ -48,7 +72,7 @@ class DiscordLink {
 
         if (msg.type === 'bridgeStatus') this.connected = true;
 
-        // Mark discordReady true as soon as server/channel info arrives
+        // As soon as guildChannels arrives, mark discordReady
         if (msg.type === 'guildChannels') {
           this.discordReady = true;
           this.guilds = msg.data.map(g => g.guildName || 'Unknown');
