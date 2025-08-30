@@ -16,7 +16,7 @@ async function sendGuildChannels(ws) {
   try {
     const guilds = [];
     for (const [guildId, guild] of client.guilds.cache) {
-      await guild.channels.fetch(); // make sure cache is filled
+      await guild.channels.fetch(); // ensure cache
       const channels = guild.channels.cache.map(c => ({
         id: c.id,
         name: c.name,
@@ -36,6 +36,10 @@ async function sendGuildChannels(ws) {
 
 client.on('ready', () => {
   console.log(`[Discord] Logged in as ${client.user.tag}`);
+  // once ready, push channels to all sockets
+  for (const ws of sockets) {
+    if (ws.readyState === ws.OPEN) sendGuildChannels(ws);
+  }
 });
 
 client.on('messageCreate', msg => {
@@ -57,9 +61,7 @@ client.on('messageCreate', msg => {
     }
   };
   for (const ws of sockets) {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify(payload));
-    }
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload));
   }
 });
 
@@ -74,15 +76,12 @@ wss.on('connection', async ws => {
     data: { status: 'connected', discordReady: !!client.user }
   }));
 
-  await sendGuildChannels(ws);
+  // if Discord is already ready, send guilds immediately
+  if (client.user) await sendGuildChannels(ws);
 
   ws.on('message', async raw => {
     let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     if (msg?.type === 'sendMessage') {
       const { channelId, content } = msg;
@@ -109,7 +108,11 @@ wss.on('connection', async ws => {
         const fetched = await channel.messages.fetch({ limit: msg.limit || 50 });
         ws.send(JSON.stringify({
           type: 'messages',
-          data: Array.from(fetched.values()).map(m => m.content),
+          data: Array.from(fetched.values()).map(m => ({
+            id: m.id,
+            content: m.content,
+            author: m.author.username
+          })),
           ref: msg.ref ?? null
         }));
       } catch (e) {
