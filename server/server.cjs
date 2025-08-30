@@ -76,8 +76,8 @@ async function refreshCache() {
   cache.servers = client.guilds.cache.map(g => ({
     id: g.id,
     name: g.name,
-    channels: g.channels.cache
-      .filter(ch => ch.isTextBased())
+channels: g.channels.cache
+      .filter(ch => ch.type === 'text')
       .map(ch => ({ id: ch.id, name: ch.name }))
   }));
   console.log(`[Discord] Cached ${cache.servers.length} servers.`);
