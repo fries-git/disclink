@@ -1,4 +1,5 @@
-// disclinkextension.js — verbose, for TurboWarp (load in browser)
+// disclinkextension.js
+// TurboWarp extension — adds a "when message received" hat + message reporters
 class DiscordLink {
   constructor(runtime) {
     this.runtime = runtime;
@@ -6,7 +7,18 @@ class DiscordLink {
     this.connected = false;
     this.discordReady = false;
     this.guilds = [];
-    this.channels = {};
+    this.channels = {}; // serverName -> array of channel names
+
+    // last received message (updated whenever server sends messageCreate)
+    this._lastMessage = {
+      content: '',
+      channelName: '',
+      guildName: '',
+      authorName: '',
+      authorId: '',
+      timestamp: 0
+    };
+
     this.reconnectDelay = 2000;
     this.reconnectTimer = null;
   }
@@ -17,14 +29,30 @@ class DiscordLink {
       name: 'Discord Link',
       color1: '#7289DA',
       blocks: [
+        // connection + status
         { opcode: 'connect', blockType: 'command', text: 'connect to bridge [URL]', arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } } },
         { opcode: 'isConnected', blockType: 'Boolean', text: 'bridge connected?' },
         { opcode: 'isDiscordReady', blockType: 'Boolean', text: 'discord ready?' },
+
+        // reporters for servers/channels
         { opcode: 'getGuilds', blockType: 'reporter', text: 'server list' },
         { opcode: 'getChannels', blockType: 'reporter', text: 'channels in server [SERVER]', arguments: { SERVER: { type: 'string', defaultValue: '' } } },
         { opcode: 'refreshServers', blockType: 'command', text: 'refresh servers' },
         { opcode: 'refreshChannels', blockType: 'command', text: 'refresh channels for server [SERVER]', arguments: { SERVER: { type: 'string', defaultValue: '' } } },
+
+        // sending
         { opcode: 'sendMessage', blockType: 'command', text: 'send [CONTENT] to [CHANNEL] in server [SERVER]', arguments: { CONTENT: { type: 'string', defaultValue: '' }, CHANNEL: { type: 'string', defaultValue: '' }, SERVER: { type: 'string', defaultValue: '' } } },
+
+        // --- NEW: hat + reporters for incoming messages ---
+        { opcode: 'whenMessageReceived', blockType: 'hat', text: 'when message received' },
+        { opcode: 'lastMessage', blockType: 'reporter', text: 'last message text' },
+        { opcode: 'lastMessageChannel', blockType: 'reporter', text: 'last message channel' },
+        { opcode: 'lastMessageServer', blockType: 'reporter', text: 'last message server' },
+        { opcode: 'lastMessageAuthor', blockType: 'reporter', text: 'last message author' },
+        { opcode: 'lastMessageAuthorId', blockType: 'reporter', text: 'last message author id' },
+        { opcode: 'lastMessageTimestamp', blockType: 'reporter', text: 'last message timestamp' },
+
+        // mention helper
         { opcode: 'mentionUser', blockType: 'reporter', text: 'mention user [ID]', arguments: { ID: { type: 'string', defaultValue: '' } } }
       ]
     };
@@ -33,9 +61,9 @@ class DiscordLink {
   _log(...args) { try { console.log('[DiscordLink ext]', ...args); } catch(e) {} }
 
   connect({ URL }) {
-    // close old
+    // close any existing connection
     if (this.ws) {
-      try { this.ws.close(); } catch(e) {}
+      try { this.ws.close(); } catch (_) {}
       this.ws = null;
     }
 
@@ -51,33 +79,68 @@ class DiscordLink {
       this._log('ws open');
       this.connected = true;
       this.discordReady = false;
-      // send ping and request guilds
-      try { this.ws.send(JSON.stringify({ type: 'ping' })); } catch(e){ this._log('ping send failed', e); }
-      try { this.ws.send(JSON.stringify({ type: 'getGuildChannels' })); } catch(e){ this._log('getGuildChannels send failed', e); }
-      // cancel reconnect
+      // immediately request guilds and ping
+      try { this.ws.send(JSON.stringify({ type: 'ping' })); } catch(e){}
+      try { this.ws.send(JSON.stringify({ type: 'getGuildChannels' })); } catch(e){}
       if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     };
 
     this.ws.onmessage = (ev) => {
-      this._log('raw message', ev.data && ev.data.toString ? ev.data.toString().slice(0,1000) : ev.data);
+      this._log('raw message', ev.data && ev.data.toString ? ev.data.toString().slice(0,2000) : ev.data);
       let msg;
       try { msg = JSON.parse(ev.data); } catch (e) { this._log('JSON parse failed', e); return; }
 
       if (msg.type === 'bridgeStatus') {
         this._log('bridgeStatus', msg);
         this.connected = !!msg.bridgeConnected;
-        // if server told us discordReady, use it; otherwise we still wait for guildChannels
         if (typeof msg.discordReady !== 'undefined') this.discordReady = !!msg.discordReady;
       }
 
       if (msg.type === 'guildChannels') {
-        this._log('guildChannels received. count=', Array.isArray(msg.data) ? msg.data.length : '!', msg);
+        this._log('guildChannels received, count=', Array.isArray(msg.data) ? msg.data.length : '!', msg);
         this.discordReady = true;
         this.guilds = (msg.data || []).map(g => g.guildName || 'Unknown');
         this.channels = {};
         (msg.data || []).forEach(g => {
           this.channels[g.guildName] = (g.channels || []).map(c => c.name || '');
         });
+      }
+
+      // handle new messages forwarded from bridge
+      if (msg.type === 'messageCreate' || msg.type === 'message') {
+        // normalize fields — server/guild might be in msg.data
+        const content     = String(d.content ?? msg.content ?? '');
+        const channelName = String(d.channelName ?? msg.channelName ?? '');
+        const guildName   = String(d.guildName ?? msg.guildName ?? d.guildId ?? msg.guildId ?? '');
+        const authorName  = String((d.author && d.author.username) ?? d.authorUsername ?? (msg.author && msg.author.username) ?? '');
+        const authorId    = String((d.author && d.author.id) ?? d.authorId ?? (msg.author && msg.author.id) ?? '');
+        const timestamp   = d.timestamp ?? msg.timestamp ?? Date.now();
+
+
+        // update last message
+        this._lastMessage = {
+          content: String(content || ''),
+          channelName: String(channelName || ''),
+          guildName: String(guildName || ''),
+          authorName: String(authorName || ''),
+          authorId: String(authorId || ''),
+          timestamp: d.timestamp ?? (msg.timestamp ?? Date.now())
+        };
+
+        this._log('lastMessage updated', this._lastMessage);
+
+        // start attached hat blocks in the runtime
+        try {
+          // 'whenMessageReceived' is the opcode we declared above
+          // runtime.startHats triggers attached hat blocks to run
+          if (this.runtime && typeof this.runtime.startHats === 'function') {
+            this.runtime.startHats('whenMessageReceived', {}); // no fields required
+          } else {
+            this._log('runtime.startHats not available (environment mismatch)');
+          }
+        } catch (e) {
+          this._log('startHats threw', e);
+        }
       }
 
       if (msg.type === 'pong') {
@@ -90,10 +153,10 @@ class DiscordLink {
     };
 
     this.ws.onclose = (ev) => {
-      this._log('ws closed', ev.code, ev.reason);
+      this._log('ws closed', ev && ev.code, ev && ev.reason);
       this.connected = false;
       this.discordReady = false;
-      // attempt reconnect once after delay
+      // attempt a reconnect once after delay
       if (!this.reconnectTimer) {
         this.reconnectTimer = setTimeout(() => {
           this._log('reconnect attempt');
@@ -111,25 +174,33 @@ class DiscordLink {
   isConnected() { return !!this.connected; }
   isDiscordReady() { return !!this.discordReady; }
 
-  // reporters
+  // reporters for server/channel lists
   getGuilds() { return this.guilds.join(', ') || 'No servers'; }
   getChannels({ SERVER }) { return this.channels[SERVER]?.join(', ') || 'No channels'; }
 
-  // actions
+  // refresh blocks
   refreshServers() {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try { this.ws.send(JSON.stringify({ type: 'getGuildChannels' })); } catch(e){ this._log('refresh send failed', e); }
-    } else {
-      this._log('refreshServers called but WS not open');
-    }
+    } else { this._log('refreshServers: ws not open'); }
   }
   refreshChannels({ SERVER }) { this.refreshServers(); }
 
+  // send message (server + channel names or ids supported)
   sendMessage({ CONTENT, CHANNEL, SERVER }) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { this._log('sendMessage: ws not open'); return; }
-    try { this.ws.send(JSON.stringify({ type: 'sendMessage', guildName: SERVER, channelName: CHANNEL, content: CONTENT })); } catch(e) { this._log('sendMessage failed', e); }
+    try { this.ws.send(JSON.stringify({ type: 'sendMessage', guildName: SERVER, channelName: CHANNEL, content: CONTENT })); } catch(e){ this._log('sendMessage failed', e); }
   }
 
+  // --- NEW: reporters for last message info ---
+  lastMessage() { return this._lastMessage.content || ''; }
+  lastMessageChannel() { return this._lastMessage.channelName || ''; }
+  lastMessageServer() { return this._lastMessage.guildName || ''; }
+  lastMessageAuthor() { return this._lastMessage.authorName || ''; }
+  lastMessageAuthorId() { return this._lastMessage.authorId || ''; }
+  lastMessageTimestamp() { return String(this._lastMessage.timestamp || ''); }
+
+  // mention helper
   mentionUser({ ID }) { return `<@${ID}>`; }
 }
 
