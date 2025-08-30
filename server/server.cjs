@@ -1,4 +1,4 @@
-// server.cjs — fixed: use return instead of continue
+// server.cjs — incremental, concurrency-limited guild/channel sender
 require('dotenv').config();
 const WebSocket = require('ws');
 const { Client } = require('discord.js-selfbot-v13');
@@ -9,129 +9,152 @@ const sockets = new Set();
 
 function L(...args){ console.log('[bridge]', ...args); }
 
-async function buildGuildData() {
-  const guilds = [];
-  for (const [id, guild] of client.guilds.cache) {
-    try { await guild.channels.fetch(); } catch (e) { /* ignore per-guild fetch errors */ }
-    const channels = guild.channels.cache
-      .filter(c => typeof c.name === 'string')
-      .map(c => ({ id: c.id, name: c.name, type: c.type }));
-    guilds.push({ guildId: guild.id, guildName: guild.name, channels });
+// Simple concurrency limiter
+async function pMapLimit(inputs, mapper, limit = 5) {
+  const results = [];
+  const executing = [];
+  for (const input of inputs) {
+    const p = Promise.resolve().then(() => mapper(input));
+    results.push(p);
+
+    executing.push(p);
+    if (executing.length >= limit) {
+      await Promise.race(executing).catch(()=>{}); // wait for first to resolve
+      // remove settled promises
+      for (let i = executing.length - 1; i >= 0; --i) {
+        if (executing[i].isFulfilled || executing[i].isRejected) {
+          executing.splice(i, 1);
+        }
+      }
+      // NOTE: Node Promises don't have isFulfilled by default. We wrap to mark settled below.
+    }
   }
-  return guilds;
+  return Promise.all(results);
 }
 
-async function sendBridgeStatus(ws) {
-  const payload = { type: 'bridgeStatus', bridgeConnected: true, discordReady: !!client.user };
-  try { ws.send(JSON.stringify(payload)); L('->', 'bridgeStatus', payload); } catch (e) { L('send bridgeStatus failed', e); }
+// small wrapper to mark settled state (because plain Promise doesn't expose isFulfilled)
+function makeTrackedPromise(p) {
+  const t = { p, isSettled: false };
+  t.p = p.then(
+    (v) => { t.isSettled = true; return v; },
+    (e) => { t.isSettled = true; throw e; }
+  );
+  return t;
 }
 
-async function sendGuildChannels(ws) {
+// concurrency-limited mapper helper using tracked promises
+async function mapWithLimit(items, mapper, limit = 5) {
+  const results = [];
+  const queue = []; // tracked promises
+  for (const item of items) {
+    const tracked = makeTrackedPromise(mapper(item));
+    results.push(tracked.p);
+    queue.push(tracked);
+    if (queue.length >= limit) {
+      // wait until one settles
+      await Promise.race(queue.map(x => x.p)).catch(()=>{});
+      // drop settled
+      for (let i = queue.length - 1; i >= 0; --i) {
+        if (queue[i].isSettled) queue.splice(i, 1);
+      }
+    }
+  }
+  return Promise.all(results);
+}
+
+// Simple in-memory cache: guildId -> { fetchedAt, channels: [{id,name,type}] }
+const guildCache = new Map();
+const CACHE_TTL_MS = 1000 * 60 * 3; // 3 minutes
+
+async function ensureGuildsCached() {
+  try {
+    if (!client.guilds || client.guilds.cache.size === 0) {
+      L('guild cache empty — attempting client.guilds.fetch()');
+      try { await client.guilds.fetch(); } catch(e){ L('client.guilds.fetch() failed (nonfatal):', e && e.message ? e.message : e); }
+    }
+  } catch (e) { L('ensureGuildsCached error', e); }
+}
+
+// New: incremental send function
+async function sendGuildChannelsIncremental(ws, options = { forceRefresh: false, concurrency: 5 }) {
   try {
     if (!client.user) {
-      const payload = { type: 'guildChannels', data: [], info: 'discord-not-ready' };
-      ws.send(JSON.stringify(payload));
-      L('->', 'guildChannels (empty, discord not ready)');
+      ws.send(JSON.stringify({ type: 'guildChannels', data: [], info: 'discord-not-ready' }));
+      L('-> guildChannels: discord not ready');
       return;
     }
-    const guilds = await buildGuildData();
-    const payload = { type: 'guildChannels', data: guilds };
-    ws.send(JSON.stringify(payload));
-    L('->', `guildChannels (sent ${guilds.length})`);
+
+    await ensureGuildsCached();
+
+    // Build lightweight guild summary to send immediately
+    const guildSummaries = [];
+    for (const [id, guild] of client.guilds.cache) {
+      guildSummaries.push({ guildId: guild.id, guildName: guild.name });
+    }
+
+    // Send the fast summary so extension can show guild names quickly
+    try {
+      ws.send(JSON.stringify({ type: 'guildSummary', data: guildSummaries }));
+      L('-> guildSummary (sent', guildSummaries.length, 'guilds)');
+    } catch (e) {
+      L('send guildSummary failed', e);
+    }
+
+    // Prepare list of guilds to fetch channels for
+    const guildList = Array.from(client.guilds.cache.values());
+
+    // mapper fetches channels for one guild and sends a partial message when ready
+    const mapper = async (guild) => {
+      const guildId = guild.id;
+      // Use cache unless forceRefresh or expired
+      const cached = guildCache.get(guildId);
+      const now = Date.now();
+      if (!options.forceRefresh && cached && (now - cached.fetchedAt) < CACHE_TTL_MS) {
+        // send cached partial quickly
+        try {
+          ws.send(JSON.stringify({ type: 'guildChannelsPartial', guild: { guildId, guildName: guild.name, channels: cached.channels } }));
+          L(`-> guildChannelsPartial (from cache) for ${guild.name} (${guild.id}) — ${cached.channels.length} channels`);
+        } catch (e) { L('send cached partial failed', e); }
+        return { guildId, fromCache: true };
+      }
+
+      // fetch channel cache for this guild
+      try {
+        await guild.channels.fetch();
+      } catch (e) {
+        L(`channels.fetch failed for guild ${guild.name} (${guild.id}):`, e && e.message ? e.message : e);
+      }
+
+      // gather text-like channels only (lightweight)
+      const channels = guild.channels.cache
+        .filter(c => c && typeof c.name === 'string')
+        .map(c => ({ id: c.id, name: c.name, type: c.type }));
+
+      // update cache
+      guildCache.set(guildId, { fetchedAt: Date.now(), channels });
+
+      // send partial for this guild
+      try {
+        ws.send(JSON.stringify({ type: 'guildChannelsPartial', guild: { guildId, guildName: guild.name, channels } }));
+        L(`-> guildChannelsPartial for ${guild.name} (${guild.id}) — ${channels.length} channels`);
+      } catch (e) {
+        L('send partial failed', e);
+      }
+
+      return { guildId, fromCache: false };
+    };
+
+    // Process guilds with concurrency limit
+    await mapWithLimit(guildList, mapper, options.concurrency || 5);
+
+    // After all partials are sent, inform client we are done
+    try {
+      ws.send(JSON.stringify({ type: 'guildChannelsComplete', ts: Date.now() }));
+      L('-> guildChannelsComplete');
+    } catch (e) { L('send complete failed', e); }
+
   } catch (e) {
-    L('sendGuildChannels error', e);
+    L('sendGuildChannelsIncremental error', e && e.message ? e.message : e);
     try { ws.send(JSON.stringify({ type: 'guildChannels', error: String(e) })); } catch {}
   }
 }
-
-function broadcastBridgeStatusAndGuilds() {
-  for (const ws of sockets) if (ws.readyState === WebSocket.OPEN) {
-    sendBridgeStatus(ws);
-    sendGuildChannels(ws);
-  }
-}
-
-client.on('ready', () => {
-  L('Discord ready as', client.user && (client.user.username || client.user.tag));
-  setTimeout(() => broadcastBridgeStatusAndGuilds(), 300);
-});
-
-client.on('message', msg => {
-  const payload = {
-    type: 'messageCreate',
-    data: {
-      id: msg.id,
-      content: msg.content ?? '',
-      author: { id: msg.author?.id, username: msg.author?.username },
-      guildId: msg.guild?.id ?? null,
-      channelId: msg.channel?.id ?? null,
-      channelName: msg.channel?.name ?? null,
-      timestamp: msg.createdTimestamp
-    }
-  };
-  for (const ws of sockets) if (ws.readyState === WebSocket.OPEN) {
-    try { ws.send(JSON.stringify(payload)); L('->', 'messageCreate forwarded'); } catch {}
-  }
-});
-
-const wss = new WebSocket.Server({ port: PORT }, () => L(`WebSocket listening on ws://localhost:${PORT}`));
-
-wss.on('connection', async (ws, req) => {
-  sockets.add(ws);
-  L('Client connected from', req.socket.remoteAddress);
-
-  // Immediately send bridge status + guild list
-  await sendBridgeStatus(ws);
-  await sendGuildChannels(ws);
-
-  ws.on('message', async raw => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch (e) { L('bad JSON from client', e); return; }
-    L('<-', 'received from client', msg.type || '(unknown)', msg);
-
-    if (msg.type === 'ping') {
-      try { ws.send(JSON.stringify({ type: 'pong', ts: Date.now() })); L('->', 'pong'); } catch (e) { L('pong send failed', e); }
-      return;
-    }
-
-    if (msg.type === 'getGuildChannels') {
-      await sendGuildChannels(ws);
-      return;
-    }
-
-    if (msg.type === 'sendMessage') {
-      const { guildName, channelName, content } = msg;
-      try {
-        const guild = client.guilds.cache.find(g => g.name === guildName || g.id === guildName);
-        if (!guild) throw new Error('Guild not found: ' + guildName);
-        try { await guild.channels.fetch(); } catch (e) {}
-        const channel = guild.channels.cache.find(c => (c.name === channelName || c.id === channelName) && 'send' in c);
-        if (!channel) throw new Error('Channel not found or not text: ' + channelName);
-        await channel.send(String(content || ''));
-        ws.send(JSON.stringify({ type: 'ack', ok: true, ref: msg.ref ?? null }));
-        L('->', `ack ok (sent to ${guildName}/${channelName})`);
-      } catch (e) {
-        ws.send(JSON.stringify({ type: 'ack', ok: false, error: String(e), ref: msg.ref ?? null }));
-        L('sendMessage error', e.message || e);
-      }
-      return;
-    }
-
-    // unknown request
-    try { ws.send(JSON.stringify({ type: 'error', error: 'unknown-request', raw: msg })); } catch (e) {}
-  });
-
-  ws.on('close', (code, reason) => {
-    sockets.delete(ws);
-    L(`Client disconnected (code=${code}, reason=${String(reason)})`);
-  });
-
-  ws.on('error', err => {
-    L('ws error', err);
-  });
-});
-
-client.login(process.env.DISCORD_TOKEN).catch(e => {
-  console.error('[Discord] Login failed:', e && e.message ? e.message : e);
-  // keep server running for debug
-});
