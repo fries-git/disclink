@@ -6,6 +6,7 @@ const PORT = Number(process.env.PORT || 3001);
 const client = new Client({ checkUpdate: false });
 const sockets = new Set();
 
+// Fetch all guilds with channels
 async function getGuildData() {
   const guilds = [];
   for (const [, guild] of client.guilds.cache) {
@@ -23,6 +24,7 @@ async function getGuildData() {
   return guilds;
 }
 
+// Broadcast to all WS clients
 function broadcast(obj) {
   const data = JSON.stringify(obj);
   for (const ws of sockets) {
@@ -30,6 +32,7 @@ function broadcast(obj) {
   }
 }
 
+// Send current connection & Discord status to a WS client
 function sendStatus(ws) {
   ws.send(JSON.stringify({
     type: 'bridgeStatus',
@@ -52,9 +55,9 @@ client.on('messageCreate', msg => {
       content: msg.content,
       author: { id: msg.author.id, username: msg.author.username },
       guildId: msg.guild?.id ?? null,
+      guildName: msg.guild?.name ?? null,
       channelId: msg.channel.id,
       channelName: msg.channel.name,
-      guildName: msg.guild?.name ?? null,
       timestamp: msg.createdTimestamp
     }
   });
@@ -89,6 +92,7 @@ wss.on('connection', async ws => {
       try {
         const guild = client.guilds.cache.find(g => g.name === guildName || g.id === guildName);
         if (!guild) throw new Error('Guild not found');
+
         const channel = guild.channels.cache.find(c => c.name === channelName || c.id === channelName);
         if (!channel || !('send' in channel)) throw new Error('Channel not found or not text-based');
 
