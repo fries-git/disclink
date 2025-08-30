@@ -3,125 +3,112 @@ require("dotenv").config();
 const WebSocket = require("ws");
 const { Client } = require("discord.js-selfbot-v13");
 
-const PORT = process.env.PORT || 3000;
-
-// --- Discord client setup ---
-const client = new Client({ checkUpdate: false });
-
-// Caches
-const cache = {
-  guilds: new Map(),   // id → { id, name }
-  channels: new Map(), // id → { id, guildId, name }
+// --- Discord Client Setup ---
+const client = new Client();
+let cache = {
+  ready: false,
+  servers: []
 };
 
-// WebSocket server
-const wss = new WebSocket.Server({ port: PORT }, () => {
-  console.log(`✅ Bridge running on ws://localhost:${PORT}`);
+client.on("ready", async () => {
+  console.log(`[Discord] Logged in as ${client.user.username}`);
+  cache.ready = true;
+  await refreshCache();
+
+  broadcast({ type: "ready", value: true });
+  sendServerList();
 });
 
-// Rate limit refresh calls
-let lastRefresh = 0;
-const REFRESH_COOLDOWN = 5000; // 5 seconds
+// --- WebSocket Setup ---
+const wss = new WebSocket.Server({ port: 3000 });
+let sockets = [];
 
-// Broadcast helper
-function broadcast(obj) {
-  const msg = JSON.stringify(obj);
-  wss.clients.forEach((ws) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
-  });
-}
-
-// --- Discord login ---
-client.on("ready", () => {
-  console.log(`🔗 Logged in as ${client.user.username}`);
-  refreshCache(true);
-});
-
-// Cache refresh
-async function refreshCache(first = false) {
-  const now = Date.now();
-  if (!first && now - lastRefresh < REFRESH_COOLDOWN) {
-    console.log("⏳ Refresh skipped (rate limit)");
-    return;
-  }
-  lastRefresh = now;
-
-  cache.guilds.clear();
-  cache.channels.clear();
-
-  client.guilds.cache.forEach((guild) => {
-    cache.guilds.set(guild.id, { id: guild.id, name: guild.name });
-    guild.channels.cache.forEach((ch) => {
-      if (ch.type === "GUILD_TEXT") {
-        cache.channels.set(ch.id, { id: ch.id, guildId: guild.id, name: ch.name });
-      }
-    });
-  });
-
-  console.log(`📦 Cached ${cache.guilds.size} servers & ${cache.channels.size} channels`);
-
-  broadcast({
-    type: "serverList",
-    data: Array.from(cache.guilds.values()),
-  });
-}
-
-// --- Handle messages from Turbowarp ---
 wss.on("connection", (ws) => {
-  console.log("🌐 Turbowarp client connected");
+  console.log("[WS] Client connected.");
+  sockets.push(ws);
 
-  ws.on("message", async (msg) => {
+  // ✅ Always send current ready state on connection
+  ws.send(JSON.stringify({ type: "ready", value: cache.ready }));
+
+  // Send servers if already cached
+  if (cache.ready && cache.servers.length > 0) {
+    sendServerList(ws);
+  }
+
+  ws.on("close", () => {
+    console.log("[WS] Client disconnected.");
+    sockets = sockets.filter(s => s !== ws);
+  });
+
+  ws.on("message", (msg) => {
     try {
-      const data = JSON.parse(msg.toString());
+      const data = JSON.parse(msg);
+      console.log("[WS] Incoming:", data);
 
-      switch (data.type) {
-        case "refreshServers":
-          await refreshCache();
-          break;
-
-        case "getChannels":
-          if (cache.guilds.has(data.guildId)) {
-            const channels = Array.from(cache.channels.values()).filter(
-              (ch) => ch.guildId === data.guildId
-            );
-            ws.send(JSON.stringify({ type: "channelList", guildId: data.guildId, data: channels }));
-          }
-          break;
-
-        case "sendMessage":
-          if (cache.channels.has(data.channelId)) {
-            const channel = client.channels.cache.get(data.channelId);
-            if (channel) {
-              await channel.send(data.content);
-              ws.send(JSON.stringify({ type: "sentMessage", ok: true }));
-            }
-          }
-          break;
+      if (data.type === "refreshServers") {
+        console.log("[WS] Refresh request received.");
+        sendServerList(ws);
       }
+
+      if (data.type === "sendMessage") {
+        console.log(`[WS] SendMessage request: server=${data.server} channel=${data.channel} text=${data.text}`);
+        sendMessageToDiscord(data.server, data.channel, data.text);
+      }
+
     } catch (err) {
-      console.error("❌ Error handling message:", err);
+      console.error("[WS] Failed to parse message:", err);
     }
   });
+});
 
-  // On connect, immediately send current server list
-  ws.send(JSON.stringify({
-    type: "serverList",
-    data: Array.from(cache.guilds.values())
+// --- Helpers ---
+function broadcast(obj) {
+  const msg = JSON.stringify(obj);
+  for (const ws of sockets) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(msg);
+    }
+  }
+}
+
+async function refreshCache() {
+  console.log("[Discord] Refreshing server cache...");
+  cache.servers = client.guilds.cache.map(g => ({
+    id: g.id,
+    name: g.name,
+    channels: g.channels.cache
+      .filter(ch => ch.isTextBased())
+      .map(ch => ({ id: ch.id, name: ch.name }))
   }));
-});
+  console.log(`[Discord] Cached ${cache.servers.length} servers.`);
+}
 
-// Forward Discord messages to Turbowarp
-client.on("messageCreate", (msg) => {
-  if (!msg.guild || msg.author.bot) return;
-  broadcast({
-    type: "message",
-    guildId: msg.guild.id,
-    channelId: msg.channel.id,
-    content: msg.content,
-    author: msg.author.username,
-    guildName: msg.guild.name,
-    channelName: msg.channel.name,
-  });
-});
+function sendServerList(target) {
+  const payload = { type: "serverList", servers: cache.servers };
+  if (target) {
+    console.log("[WS] Sending server list to a client.");
+    target.send(JSON.stringify(payload));
+  } else {
+    console.log("[WS] Broadcasting server list to all clients.");
+    broadcast(payload);
+  }
+}
 
+async function sendMessageToDiscord(serverName, channelName, text) {
+  try {
+    const guild = client.guilds.cache.find(g => g.name === serverName || g.id === serverName);
+    if (!guild) return console.log(`[Discord] Server not found: ${serverName}`);
+
+    const channel = guild.channels.cache.find(c => c.name === channelName || c.id === channelName);
+    if (!channel) return console.log(`[Discord] Channel not found in ${serverName}: ${channelName}`);
+
+    await channel.send(text);
+    console.log(`[Discord] Sent message to #${channel.name} in ${guild.name}: ${text}`);
+  } catch (err) {
+    console.error("[Discord] Failed to send message:", err);
+  }
+}
+
+// --- Start ---
 client.login(process.env.TOKEN);
+console.log("[Server] Starting Discord bridge on ws://localhost:3000");
