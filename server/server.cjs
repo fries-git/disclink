@@ -73,14 +73,35 @@ function broadcast(obj) {
 
 async function refreshCache() {
   console.log("[Discord] Refreshing server cache...");
-  cache.servers = client.guilds.cache.map(g => ({
-    id: g.id,
-    name: g.name,
-channels: g.channels.cache
-      .filter(ch => ch.type === 'text')
-      .map(ch => ({ id: ch.id, name: ch.name }))
-  }));
-  console.log(`[Discord] Cached ${cache.servers.length} servers.`);
+  cache.servers = [];
+
+  try {
+    // Explicitly fetch all guilds
+    for (const [guildId, guild] of client.guilds.cache) {
+      await guild.channels.fetch(); // ensure channel cache
+      const textChannels = guild.channels.cache
+        .filter(ch => ch.type === 'text')
+        .map(ch => ({ id: ch.id, name: ch.name }));
+
+      cache.servers.push({
+        id: guild.id,
+        name: guild.name,
+        channels: textChannels
+      });
+
+      console.log(`[Discord] Cached guild: ${guild.name} (${textChannels.length} channels)`);
+    }
+
+    cache.ready = true; // now safe to mark ready
+    console.log("[Discord] Cache refresh complete, ready = true");
+
+    broadcast({ type: "ready", value: true });
+    sendServerList();
+  } catch (err) {
+    console.error("[Discord] Failed to refresh cache:", err);
+    cache.ready = false;
+    broadcast({ type: "ready", value: false });
+  }
 }
 
 function sendServerList(target) {
