@@ -6,7 +6,6 @@ const PORT = Number(process.env.PORT || 3001);
 const client = new Client({ checkUpdate: false });
 const sockets = new Set();
 
-// Fetch all guilds with channels
 async function getGuildData() {
   const guilds = [];
   for (const [, guild] of client.guilds.cache) {
@@ -14,17 +13,14 @@ async function getGuildData() {
     guilds.push({
       guildId: guild.id,
       guildName: guild.name,
-      channels: guild.channels.cache.map(c => ({
-        id: c.id,
-        name: c.name,
-        type: c.type
-      }))
+      channels: guild.channels.cache
+        .filter(c => c.isText()) // only text channels
+        .map(c => ({ id: c.id, name: c.name }))
     });
   }
   return guilds;
 }
 
-// Broadcast to all WS clients
 function broadcast(obj) {
   const data = JSON.stringify(obj);
   for (const ws of sockets) {
@@ -32,19 +28,11 @@ function broadcast(obj) {
   }
 }
 
-// Send current connection & Discord status to a WS client
-function sendStatus(ws) {
-  ws.send(JSON.stringify({
-    type: 'bridgeStatus',
-    connected: true,
-    discordReady: !!client.user
-  }));
-}
-
 client.on('ready', async () => {
   console.log(`[Discord] Logged in as ${client.user.tag}`);
+  const guilds = await getGuildData();
   broadcast({ type: 'discordReady', user: { id: client.user.id, tag: client.user.tag } });
-  broadcast({ type: 'guildChannels', data: await getGuildData() });
+  broadcast({ type: 'guildChannels', data: guilds });
 });
 
 client.on('messageCreate', msg => {
@@ -70,18 +58,13 @@ wss.on('connection', async ws => {
   sockets.add(ws);
   console.log('[WS] Client connected');
 
-  sendStatus(ws);
-  if (client.user) {
-    ws.send(JSON.stringify({ type: 'guildChannels', data: await getGuildData() }));
-  }
+  // send current status and guilds
+  ws.send(JSON.stringify({ type: 'bridgeStatus', connected: true, discordReady: !!client.user }));
+  if (client.user) ws.send(JSON.stringify({ type: 'guildChannels', data: await getGuildData() }));
 
   ws.on('message', async raw => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
-
-    if (msg.type === 'ping') {
-      sendStatus(ws);
-    }
 
     if (msg.type === 'getGuildChannels') {
       ws.send(JSON.stringify({ type: 'guildChannels', data: await getGuildData() }));
@@ -92,10 +75,8 @@ wss.on('connection', async ws => {
       try {
         const guild = client.guilds.cache.find(g => g.name === guildName || g.id === guildName);
         if (!guild) throw new Error('Guild not found');
-
         const channel = guild.channels.cache.find(c => c.name === channelName || c.id === channelName);
         if (!channel || !('send' in channel)) throw new Error('Channel not found or not text-based');
-
         await channel.send(content || '');
         ws.send(JSON.stringify({ type: 'ack', ok: true, ref: msg.ref ?? null }));
       } catch (e) {

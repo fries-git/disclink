@@ -5,6 +5,8 @@ class DiscordLink {
     this.connected = false;
     this.discordReady = false;
     this.guilds = [];
+    this.serversMenu = [];  // dropdown menu
+    this.channelsMenu = {};  // dropdown menu per server
   }
 
   getInfo() {
@@ -21,12 +23,12 @@ class DiscordLink {
         },
         {
           opcode: 'isConnected',
-          blockType: 'Boolean', // hexagonal
+          blockType: 'Boolean',
           text: 'bridge connected?'
         },
         {
           opcode: 'isDiscordReady',
-          blockType: 'Boolean', // hexagonal
+          blockType: 'Boolean',
           text: 'discord ready?'
         },
         {
@@ -38,7 +40,7 @@ class DiscordLink {
           opcode: 'getChannels',
           blockType: 'reporter',
           text: 'channels in server [GUILD]',
-          arguments: { GUILD: { type: 'string', defaultValue: '' } }
+          arguments: { GUILD: { type: 'string', menu: 'servers' } }
         },
         {
           opcode: 'sendMessage',
@@ -46,8 +48,8 @@ class DiscordLink {
           text: 'send [TEXT] in channel [CHANNEL] of server [SERVER]',
           arguments: {
             TEXT: { type: 'string', defaultValue: 'Hello world!' },
-            CHANNEL: { type: 'string', defaultValue: '' },
-            SERVER: { type: 'string', defaultValue: '' }
+            CHANNEL: { type: 'string', menu: 'channels', defaultValue: '' },
+            SERVER: { type: 'string', menu: 'servers', defaultValue: '' }
           }
         },
         {
@@ -56,66 +58,65 @@ class DiscordLink {
           text: 'mention user [ID]',
           arguments: { ID: { type: 'string', defaultValue: '1234567890' } }
         }
-      ]
+      ],
+      menus: {
+        servers: () => this.serversMenu,
+        channels: args => this.channelsMenu[args.SERVER] || []
+      }
     };
   }
 
   connect({ URL }) {
     this.ws = new WebSocket(URL);
-
     this.ws.onopen = () => {
       this.connected = true;
-      console.log('[DiscordLink] Connected');
       this.ws.send(JSON.stringify({ type: 'getGuildChannels' }));
     };
-
     this.ws.onclose = () => {
       this.connected = false;
       this.discordReady = false;
       this.guilds = [];
+      this.serversMenu = [];
+      this.channelsMenu = {};
     };
-
     this.ws.onmessage = ev => {
       const msg = JSON.parse(ev.data);
-
       if (msg.type === 'bridgeStatus') {
         this.connected = true;
         this.discordReady = msg.discordReady;
       }
-
       if (msg.type === 'discordReady') {
         this.discordReady = true;
         this.ws.send(JSON.stringify({ type: 'getGuildChannels' }));
       }
-
       if (msg.type === 'guildChannels') {
         this.guilds = msg.data || [];
+        // populate menus
+        this.serversMenu = this.guilds.map(g => g.guildName);
+        this.channelsMenu = {};
+        this.guilds.forEach(g => {
+          this.channelsMenu[g.guildName] = g.channels.map(c => c.name);
+        });
       }
     };
   }
 
-  isConnected() {
-    return !!this.connected;
-  }
-
-  isDiscordReady() {
-    return !!this.discordReady;
-  }
+  isConnected() { return !!this.connected; }
+  isDiscordReady() { return !!this.discordReady; }
 
   getGuilds() {
-    if (!this.guilds || this.guilds.length === 0) return 'No servers';
     return this.guilds.map(g => g.guildName).join(', ');
   }
 
   getChannels({ GUILD }) {
-    const guild = this.guilds.find(g => g.guildName === GUILD || g.guildId === GUILD);
-    if (!guild || !guild.channels) return 'No channels';
+    const guild = this.guilds.find(g => g.guildName === GUILD);
+    if (!guild) return '';
     return guild.channels.map(c => c.name).join(', ');
   }
 
   sendMessage({ TEXT, CHANNEL, SERVER }) {
     if (!this.ws) return;
-    let fixed = TEXT.replace(/@(\d{5,})/g, '<@$1>'); // auto ping
+    const fixed = TEXT.replace(/@(\d{5,})/g, '<@$1>');
     this.ws.send(JSON.stringify({
       type: 'sendMessage',
       guildName: SERVER,
@@ -124,9 +125,7 @@ class DiscordLink {
     }));
   }
 
-  mentionUser({ ID }) {
-    return `<@${ID}>`;
-  }
+  mentionUser({ ID }) { return `<@${ID}>`; }
 }
 
 Scratch.extensions.register(new DiscordLink());
