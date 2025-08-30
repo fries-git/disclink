@@ -2,8 +2,6 @@
 // Requires: npm i discord.js-selfbot-v13 ws dotenv
 require('dotenv').config();
 const WebSocket = require('ws');
-const { Client, Partials } = require('discord.js-selfbot-v13');
-
 const PORT = Number(process.env.PORT || 3001);
 const { Client } = require('discord.js-selfbot-v13');
 const client = new Client();
