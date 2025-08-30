@@ -14,38 +14,15 @@ class DiscordLink {
       name: 'Discord Link',
       color1: '#7289DA',
       blocks: [
-        {
-          opcode: 'connect',
-          blockType: 'command',
-          text: 'connect to bridge [URL]',
-          arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } }
-        },
+        { opcode: 'connect', blockType: 'command', text: 'connect to bridge [URL]', arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } } },
         { opcode: 'isConnected', blockType: 'Boolean', text: 'bridge connected?' },
         { opcode: 'isDiscordReady', blockType: 'Boolean', text: 'discord ready?' },
         { opcode: 'getGuilds', blockType: 'reporter', text: 'server list' },
-        {
-          opcode: 'getChannels',
-          blockType: 'reporter',
-          text: 'channels in server [SERVER]',
-          arguments: { SERVER: { type: 'string', defaultValue: '' } }
-        },
-        {
-          opcode: 'refreshServers',
-          blockType: 'command',
-          text: 'refresh servers'
-        },
-        {
-          opcode: 'refreshChannels',
-          blockType: 'command',
-          text: 'refresh channels for server [SERVER]',
-          arguments: { SERVER: { type: 'string', defaultValue: '' } }
-        },
-        {
-          opcode: 'mentionUser',
-          blockType: 'reporter',
-          text: 'mention user [ID]',
-          arguments: { ID: { type: 'string', defaultValue: '1234567890' } }
-        }
+        { opcode: 'getChannels', blockType: 'reporter', text: 'channels in server [SERVER]', arguments: { SERVER: { type: 'string', defaultValue: '' } } },
+        { opcode: 'refreshServers', blockType: 'command', text: 'refresh servers' },
+        { opcode: 'refreshChannels', blockType: 'command', text: 'refresh channels for server [SERVER]', arguments: { SERVER: { type: 'string', defaultValue: '' } } },
+        { opcode: 'sendMessage', blockType: 'command', text: 'send [CONTENT] to [CHANNEL] in server [SERVER]', arguments: { CONTENT: { type: 'string', defaultValue: '' }, CHANNEL: { type: 'string', defaultValue: '' }, SERVER: { type: 'string', defaultValue: '' } } },
+        { opcode: 'mentionUser', blockType: 'reporter', text: 'mention user [ID]', arguments: { ID: { type: 'string', defaultValue: '' } } }
       ]
     };
   }
@@ -70,9 +47,11 @@ class DiscordLink {
       try {
         const msg = JSON.parse(ev.data);
 
-        if (msg.type === 'bridgeStatus') this.connected = true;
+        if (msg.type === 'bridgeStatus') {
+          this.connected = !!msg.bridgeConnected;
+          this.discordReady = !!msg.discordReady;
+        }
 
-        // As soon as guildChannels arrives, mark discordReady
         if (msg.type === 'guildChannels') {
           this.discordReady = true;
           this.guilds = msg.data.map(g => g.guildName || 'Unknown');
@@ -81,13 +60,18 @@ class DiscordLink {
             this.channels[g.guildName] = g.channels.map(c => c.name || '');
           });
         }
+
+        if (msg.type === 'ack') {
+          // optional: handle message send acknowledgment
+        }
+
       } catch (e) {
-        console.error("WS parse error:", e);
+        console.error('WS parse error', e);
       }
     };
   }
 
-  // Hexagonal booleans
+  // Booleans
   isConnected() { return !!this.connected; }
   isDiscordReady() { return !!this.discordReady; }
 
@@ -95,12 +79,17 @@ class DiscordLink {
   getGuilds() { return this.guilds.join(', ') || "No servers"; }
   getChannels({ SERVER }) { return this.channels[SERVER]?.join(', ') || "No channels"; }
 
-  // Refresh blocks
+  // Refresh
   refreshServers() {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN)
-      this.ws.send(JSON.stringify({ type: 'getGuildChannels' }));
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'getGuildChannels' }));
   }
   refreshChannels({ SERVER }) { this.refreshServers(); }
+
+  // Send message
+  sendMessage({ CONTENT, CHANNEL, SERVER }) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'sendMessage', guildName: SERVER, channelName: CHANNEL, content: CONTENT }));
+  }
 
   // Mention user
   mentionUser({ ID }) { return `<@${ID}>`; }
