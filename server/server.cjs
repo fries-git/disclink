@@ -1,20 +1,19 @@
 require('dotenv').config();
-const { WebSocketServer } = require('ws');
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const { Client } = require('discord.js-selfbot-v13');
+const WebSocket = require('ws');
 
 const PORT = Number(process.env.PORT || 3001);
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-  partials: [Partials.Channel]
-});
+
+const client = new Client();
 
 const sockets = new Set();
 
+// Send full guild + channel info to a WS client
 async function sendGuildChannels(ws) {
   try {
     const guilds = [];
     for (const [guildId, guild] of client.guilds.cache) {
-      await guild.channels.fetch();
+      await guild.channels.fetch(); // fetch all channels
       const channels = guild.channels.cache.map(c => ({ id: c.id, name: c.name, type: c.type }));
       guilds.push({ guildId: guild.id, guildName: guild.name, channels });
     }
@@ -24,42 +23,46 @@ async function sendGuildChannels(ws) {
   }
 }
 
+// Broadcast to all connected clients
 function broadcastGuildChannels() {
   for (const ws of sockets) {
-    if (ws.readyState === ws.OPEN) sendGuildChannels(ws);
+    if (ws.readyState === WebSocket.OPEN) sendGuildChannels(ws);
   }
 }
 
+// Discord selfbot ready
 client.on('ready', () => {
-  console.log(`[Discord] Logged in as ${client.user.tag}`);
+  console.log(`[Discord] Logged in as ${client.user.username}`);
   broadcastGuildChannels();
 });
 
-client.on('messageCreate', msg => {
+// Listen for messages (optional, can forward to WS)
+client.on('message', msg => {
   const payload = {
     type: 'messageCreate',
     data: {
       messageId: msg.id,
       content: msg.content ?? '',
-      author: { id: msg.author?.id, username: msg.author?.username, bot: msg.author?.bot ?? false },
-      channelId: msg.channel?.id ?? null,
-      channelName: msg.channel?.name ?? null,
-      channelType: msg.channel?.type ?? null,
+      author: { id: msg.author.id, username: msg.author.username, bot: msg.author.bot ?? false },
+      channelId: msg.channel.id,
+      channelName: msg.channel.name,
+      channelType: msg.channel.type,
       guildId: msg.guild?.id ?? null,
       createdTimestamp: msg.createdTimestamp
     }
   };
-  for (const ws of sockets) if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload));
+  for (const ws of sockets) if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
 });
 
-const wss = new WebSocketServer({ port: PORT });
+// WebSocket server
+const wss = new WebSocket.Server({ port: PORT });
 
 wss.on('connection', async ws => {
   sockets.add(ws);
   console.log('[WS] Client connected');
 
   ws.send(JSON.stringify({ type: 'bridgeStatus' }));
-  await sendGuildChannels(ws);
+  await sendGuildChannels(ws); // send initial data
 
   ws.on('message', async raw => {
     let msg;
@@ -90,6 +93,7 @@ wss.on('connection', async ws => {
   });
 });
 
+// Login using user token from .env
 client.login(process.env.DISCORD_TOKEN).catch(e => {
   console.error('[Discord] Login failed:', e);
   process.exit(1);
