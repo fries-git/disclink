@@ -5,7 +5,8 @@ const WebSocket = require('ws');
 const { Client, Partials } = require('discord.js-selfbot-v13');
 
 const PORT = Number(process.env.PORT || 3001);
-const client = new Client({ partials: [Partials.Channel] });
+const { Client } = require('discord.js-selfbot-v13');
+const client = new Client();
 const wss = new WebSocket.Server({ port: PORT });
 const sockets = new Set();
 
