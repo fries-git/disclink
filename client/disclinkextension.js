@@ -2,6 +2,8 @@ class DiscordLink {
   constructor(runtime) {
     this.runtime = runtime;
     this.ws = null;
+    this.connected = false;
+    this.discordReady = false;
     this.guilds = [];
     this.messages = [];
   }
@@ -18,6 +20,16 @@ class DiscordLink {
           arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } }
         },
         {
+          opcode: 'isConnected',
+          blockType: 'boolean',
+          text: 'bridge connected?'
+        },
+        {
+          opcode: 'isDiscordReady',
+          blockType: 'boolean',
+          text: 'discord ready?'
+        },
+        {
           opcode: 'getGuilds',
           blockType: 'reporter',
           text: 'server list'
@@ -29,12 +41,6 @@ class DiscordLink {
           arguments: { GUILD: { type: 'string', defaultValue: '' } }
         },
         {
-          opcode: 'getMessages',
-          blockType: 'reporter',
-          text: 'messages in channel [CHANNEL]',
-          arguments: { CHANNEL: { type: 'string', defaultValue: '' } }
-        },
-        {
           opcode: 'sendMessage',
           blockType: 'command',
           text: 'send [TEXT] to channel [CHANNEL]',
@@ -42,6 +48,12 @@ class DiscordLink {
             TEXT: { type: 'string', defaultValue: 'Hello world!' },
             CHANNEL: { type: 'string', defaultValue: '' }
           }
+        },
+        {
+          opcode: 'mentionUser',
+          blockType: 'reporter',
+          text: 'mention user [ID]',
+          arguments: { ID: { type: 'string', defaultValue: '1234567890' } }
         }
       ]
     };
@@ -49,16 +61,34 @@ class DiscordLink {
 
   connect({ URL }) {
     this.ws = new WebSocket(URL);
-    this.ws.onopen = () => console.log('[DiscordLink] Connected');
+    this.ws.onopen = () => {
+      this.connected = true;
+      console.log('[DiscordLink] Connected');
+    };
+    this.ws.onclose = () => {
+      this.connected = false;
+      this.discordReady = false;
+    };
     this.ws.onmessage = ev => {
       const msg = JSON.parse(ev.data);
-      if (msg.type === 'guildChannels' && msg.data) {
+      if (msg.type === 'bridgeStatus') {
+        this.discordReady = msg.discordReady;
+      }
+      if (msg.type === 'discordReady') {
+        this.discordReady = true;
+      }
+      if (msg.type === 'guildChannels') {
         this.guilds = msg.data;
       }
-      if (msg.type === 'messages' && msg.data) {
-        this.messages = msg.data;
-      }
     };
+  }
+
+  isConnected() {
+    return this.connected;
+  }
+
+  isDiscordReady() {
+    return this.discordReady;
   }
 
   getGuilds() {
@@ -71,15 +101,15 @@ class DiscordLink {
     return guild.channels.map(c => c.name).join(', ');
   }
 
-  getMessages({ CHANNEL }) {
-    if (!this.ws) return '';
-    this.ws.send(JSON.stringify({ type: 'getMessages', channelId: CHANNEL, limit: 10, ref: 'scratch' }));
-    return this.messages.map(m => `${m.author}: ${m.content}`).join('\n');
-  }
-
   sendMessage({ TEXT, CHANNEL }) {
     if (!this.ws) return;
-    this.ws.send(JSON.stringify({ type: 'sendMessage', channelId: CHANNEL, content: TEXT }));
+    // auto translate @username style to <@id> (if id is provided in text)
+    let fixed = TEXT.replace(/@(\d{5,})/g, '<@$1>');
+    this.ws.send(JSON.stringify({ type: 'sendMessage', channelId: CHANNEL, content: fixed }));
+  }
+
+  mentionUser({ ID }) {
+    return `<@${ID}>`;
   }
 }
 
