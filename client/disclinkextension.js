@@ -8,56 +8,59 @@ class DiscordLink {
   }
 
   getInfo() {
-    return {
-      id: 'disclink',
-      name: 'Discord Link',
-      blocks: [
-        {
-          opcode: 'connect',
-          blockType: 'command',
-          text: 'connect to bridge [URL]',
-          arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } }
-        },
-        {
-          opcode: 'isConnected',
-          blockType: 'boolean',
-          text: 'bridge connected?'
-        },
-        {
-          opcode: 'isDiscordReady',
-          blockType: 'boolean',
-          text: 'discord ready?'
-        },
-        {
-          opcode: 'getGuilds',
-          blockType: 'reporter',
-          text: 'server list'
-        },
-        {
-          opcode: 'getChannels',
-          blockType: 'reporter',
-          text: 'channels in server [GUILD]',
-          arguments: { GUILD: { type: 'string', defaultValue: '' } }
-        },
-        {
-          opcode: 'sendMessage',
-          blockType: 'command',
-          text: 'send [TEXT] in channel [CHANNEL] of server [SERVER]',
-          arguments: {
-            TEXT: { type: 'string', defaultValue: 'Hello world!' },
-            CHANNEL: { type: 'string', defaultValue: '' },
-            SERVER: { type: 'string', defaultValue: '' }
-          }
-        },
-        {
-          opcode: 'mentionUser',
-          blockType: 'reporter',
-          text: 'mention user [ID]',
-          arguments: { ID: { type: 'string', defaultValue: '1234567890' } }
+  return {
+    id: 'disclink',
+    name: 'Discord Link',
+    blocks: [
+      {
+        opcode: 'connect',
+        blockType: 'command',
+        text: 'connect to bridge [URL]',
+        arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } }
+      },
+      {
+        opcode: 'isConnected',
+        blockType: 'Boolean', // Capital B! → hexagonal
+        text: 'bridge connected?'
+      },
+      {
+        opcode: 'isDiscordReady',
+        blockType: 'Boolean', // Capital B! → hexagonal
+        text: 'discord ready?'
+      },
+      {
+        opcode: 'getGuilds',
+        blockType: 'reporter',
+        text: 'server list'
+      },
+      {
+        opcode: 'getChannels',
+        blockType: 'reporter',
+        text: 'channels in server [GUILD]',
+        arguments: { GUILD: { type: 'string', defaultValue: '' } }
+      },
+      {
+        opcode: 'sendMessage',
+        blockType: 'command',
+        text: 'send [TEXT] in channel [CHANNEL] of server [SERVER]',
+        arguments: {
+          TEXT: { type: 'string', defaultValue: 'Hello world!' },
+          CHANNEL: { type: 'string', defaultValue: '' },
+          SERVER: { type: 'string', defaultValue: '' }
         }
-      ]
-    };
-  }
+      }
+    ]
+  };
+}
+
+isConnected() {
+  return !!this.connected; // returns true/false synchronously
+}
+
+isDiscordReady() {
+  return !!this.discordReady; // returns true/false synchronously
+}
+
 
   connect({ URL }) {
     this.ws = new WebSocket(URL);
