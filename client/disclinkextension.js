@@ -5,8 +5,7 @@ class DiscordLink {
     this.connected = false;
     this.discordReady = false;
     this.guilds = [];
-    this.serversMenu = [];  // dropdown menu
-    this.channelsMenu = {};  // dropdown menu per server
+    this.channels = {}; // serverName -> array of channel names
   }
 
   getInfo() {
@@ -15,116 +14,71 @@ class DiscordLink {
       name: 'Discord Link',
       color1: '#7289DA',
       blocks: [
-        {
-          opcode: 'connect',
-          blockType: 'command',
-          text: 'connect to bridge [URL]',
-          arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } }
-        },
-        {
-          opcode: 'isConnected',
-          blockType: 'Boolean',
-          text: 'bridge connected?'
-        },
-        {
-          opcode: 'isDiscordReady',
-          blockType: 'Boolean',
-          text: 'discord ready?'
-        },
-        {
-          opcode: 'getGuilds',
-          blockType: 'reporter',
-          text: 'server list'
-        },
-        {
-          opcode: 'getChannels',
-          blockType: 'reporter',
-          text: 'channels in server [GUILD]',
-          arguments: { GUILD: { type: 'string', menu: 'servers' } }
-        },
-        {
-          opcode: 'sendMessage',
-          blockType: 'command',
-          text: 'send [TEXT] in channel [CHANNEL] of server [SERVER]',
-          arguments: {
-            TEXT: { type: 'string', defaultValue: 'Hello world!' },
-            CHANNEL: { type: 'string', menu: 'channels', defaultValue: '' },
-            SERVER: { type: 'string', menu: 'servers', defaultValue: '' }
-          }
-        },
-        {
-          opcode: 'mentionUser',
-          blockType: 'reporter',
-          text: 'mention user [ID]',
-          arguments: { ID: { type: 'string', defaultValue: '1234567890' } }
-        }
-      ],
-      menus: {
-        servers: () => this.serversMenu,
-        channels: args => this.channelsMenu[args.SERVER] || []
-      }
+        { opcode: 'connect', blockType: 'command', text: 'connect to bridge [URL]', arguments: { URL: { type: 'string', defaultValue: 'ws://localhost:3001' } } },
+        { opcode: 'isConnected', blockType: 'Boolean', text: 'bridge connected?' },
+        { opcode: 'isDiscordReady', blockType: 'Boolean', text: 'discord ready?' },
+        { opcode: 'getGuilds', blockType: 'reporter', text: 'server list' },
+        { opcode: 'getChannels', blockType: 'reporter', text: 'channels in server [SERVER]', arguments: { SERVER: { type: 'string', defaultValue: '' } } },
+        { opcode: 'refreshServers', blockType: 'command', text: 'refresh servers' },
+        { opcode: 'refreshChannels', blockType: 'command', text: 'refresh channels for server [SERVER]', arguments: { SERVER: { type: 'string', defaultValue: '' } } },
+        { opcode: 'mentionUser', blockType: 'reporter', text: 'mention user [ID]', arguments: { ID: { type: 'string', defaultValue: '1234567890' } } }
+      ]
     };
   }
 
   connect({ URL }) {
+    if (this.ws) this.ws.close();
     this.ws = new WebSocket(URL);
+
     this.ws.onopen = () => {
       this.connected = true;
-      this.ws.send(JSON.stringify({ type: 'getGuildChannels' }));
+      this.refreshServers();
     };
+
     this.ws.onclose = () => {
       this.connected = false;
       this.discordReady = false;
       this.guilds = [];
-      this.serversMenu = [];
-      this.channelsMenu = {};
+      this.channels = {};
     };
+
     this.ws.onmessage = ev => {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === 'bridgeStatus') {
-        this.connected = true;
-        this.discordReady = msg.discordReady;
-      }
-      if (msg.type === 'discordReady') {
-        this.discordReady = true;
-        this.ws.send(JSON.stringify({ type: 'getGuildChannels' }));
-      }
-      if (msg.type === 'guildChannels') {
-        this.guilds = msg.data || [];
-        // populate menus
-        this.serversMenu = this.guilds.map(g => g.guildName);
-        this.channelsMenu = {};
-        this.guilds.forEach(g => {
-          this.channelsMenu[g.guildName] = g.channels.map(c => c.name);
-        });
+      try {
+        const msg = JSON.parse(ev.data);
+
+        if (msg.type === 'bridgeStatus') this.connected = true;
+
+        // Mark discordReady true as soon as server/channel info arrives
+        if (msg.type === 'guildChannels') {
+          this.discordReady = true;
+          this.guilds = msg.data.map(g => g.guildName || 'Unknown');
+          this.channels = {};
+          msg.data.forEach(g => {
+            this.channels[g.guildName] = g.channels.map(c => c.name || '');
+          });
+        }
+      } catch (e) {
+        console.error("WS parse error:", e);
       }
     };
   }
 
+  // Hexagonal booleans
   isConnected() { return !!this.connected; }
   isDiscordReady() { return !!this.discordReady; }
 
-  getGuilds() {
-    return this.guilds.map(g => g.guildName).join(', ');
-  }
+  // Reporters
+  getGuilds() { return this.guilds.join(', ') || "No servers"; }
+  getChannels({ SERVER }) { return this.channels[SERVER]?.join(', ') || "No channels"; }
 
-  getChannels({ GUILD }) {
-    const guild = this.guilds.find(g => g.guildName === GUILD);
-    if (!guild) return '';
-    return guild.channels.map(c => c.name).join(', ');
+  // Refresh blocks
+  refreshServers() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN)
+      this.ws.send(JSON.stringify({ type: 'getGuildChannels' }));
   }
+  refreshChannels({ SERVER }) { this.refreshServers(); }
 
-  sendMessage({ TEXT, CHANNEL, SERVER }) {
-    if (!this.ws) return;
-    const fixed = TEXT.replace(/@(\d{5,})/g, '<@$1>');
-    this.ws.send(JSON.stringify({
-      type: 'sendMessage',
-      guildName: SERVER,
-      channelName: CHANNEL,
-      content: fixed
-    }));
-  }
-
+  // Mention user
   mentionUser({ ID }) { return `<@${ID}>`; }
 }
 
