@@ -1,11 +1,13 @@
-import 'dotenv/config';
-import { WebSocketServer } from 'ws';
-import { Client } from 'discord.js-selfbot-v13';
+// Load .env file
+require('dotenv').config();
+
+const { WebSocketServer } = require('ws');
+const { Client } = require('discord.js-selfbot-v13');
 
 const PORT = Number(process.env.PORT || 3001);
 
 const client = new Client({
-  checkUpdate: false // stops update spam in console
+  checkUpdate: false // disable update spam
 });
 
 const sockets = new Set();
@@ -14,7 +16,7 @@ async function sendGuildChannels(ws) {
   try {
     const guilds = [];
     for (const [guildId, guild] of client.guilds.cache) {
-      await guild.channels.fetch(); // ensure cache is filled
+      await guild.channels.fetch(); // make sure cache is filled
       const channels = guild.channels.cache.map(c => ({
         id: c.id,
         name: c.name,

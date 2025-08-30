@@ -1,7 +1,6 @@
 {
   "name": "discord-turbowarp-bridge",
   "version": "1.0.0",
-  "type": "module",
   "main": "server.cjs",
   "description": "A WebSocket bridge for Discord self-bot and TurboWarp integration",
   "scripts": {
