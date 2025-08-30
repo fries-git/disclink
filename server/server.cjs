@@ -1,4 +1,4 @@
-// server.cjs
+// server.cjs — fixed: use return instead of continue
 require('dotenv').config();
 const WebSocket = require('ws');
 const { Client } = require('discord.js-selfbot-v13');
@@ -7,46 +7,56 @@ const PORT = Number(process.env.PORT || 3001);
 const client = new Client();
 const sockets = new Set();
 
-// robust logging helper
-function log(...args) { console.log('[bridge]', ...args); }
+function L(...args){ console.log('[bridge]', ...args); }
+
+async function buildGuildData() {
+  const guilds = [];
+  for (const [id, guild] of client.guilds.cache) {
+    try { await guild.channels.fetch(); } catch (e) { /* ignore per-guild fetch errors */ }
+    const channels = guild.channels.cache
+      .filter(c => typeof c.name === 'string')
+      .map(c => ({ id: c.id, name: c.name, type: c.type }));
+    guilds.push({ guildId: guild.id, guildName: guild.name, channels });
+  }
+  return guilds;
+}
+
+async function sendBridgeStatus(ws) {
+  const payload = { type: 'bridgeStatus', bridgeConnected: true, discordReady: !!client.user };
+  try { ws.send(JSON.stringify(payload)); L('->', 'bridgeStatus', payload); } catch (e) { L('send bridgeStatus failed', e); }
+}
 
 async function sendGuildChannels(ws) {
   try {
     if (!client.user) {
-      ws.send(JSON.stringify({ type: 'guildChannels', data: [], info: 'discord-not-ready' }));
+      const payload = { type: 'guildChannels', data: [], info: 'discord-not-ready' };
+      ws.send(JSON.stringify(payload));
+      L('->', 'guildChannels (empty, discord not ready)');
       return;
     }
-    const guilds = [];
-    for (const [id, guild] of client.guilds.cache) {
-      // ensure channels cached
-      try { await guild.channels.fetch(); } catch (e) { /* ignore fetch errors per guild */ }
-      const channels = guild.channels.cache
-        .filter(c => typeof c.name === 'string')
-        .map(c => ({ id: c.id, name: c.name, type: c.type }));
-      guilds.push({ guildId: guild.id, guildName: guild.name, channels });
-    }
-    ws.send(JSON.stringify({ type: 'guildChannels', data: guilds }));
-    log('sent guildChannels to client (count:', guilds.length + ')');
+    const guilds = await buildGuildData();
+    const payload = { type: 'guildChannels', data: guilds };
+    ws.send(JSON.stringify(payload));
+    L('->', `guildChannels (sent ${guilds.length})`);
   } catch (e) {
-    log('sendGuildChannels error:', e);
+    L('sendGuildChannels error', e);
     try { ws.send(JSON.stringify({ type: 'guildChannels', error: String(e) })); } catch {}
   }
 }
 
-function broadcastGuildChannels() {
-  for (const ws of sockets) {
-    if (ws.readyState === WebSocket.OPEN) sendGuildChannels(ws);
+function broadcastBridgeStatusAndGuilds() {
+  for (const ws of sockets) if (ws.readyState === WebSocket.OPEN) {
+    sendBridgeStatus(ws);
+    sendGuildChannels(ws);
   }
 }
 
 client.on('ready', () => {
-  log('Discord logged in as', client.user?.username || client.user?.tag);
-  // give a short delay to allow channel caches to populate more reliably
-  setTimeout(() => broadcastGuildChannels(), 500);
+  L('Discord ready as', client.user && (client.user.username || client.user.tag));
+  setTimeout(() => broadcastBridgeStatusAndGuilds(), 300);
 });
 
 client.on('message', msg => {
-  // Optional: forward messages to WS clients if you want live message events
   const payload = {
     type: 'messageCreate',
     data: {
@@ -59,33 +69,28 @@ client.on('message', msg => {
       timestamp: msg.createdTimestamp
     }
   };
-  for (const ws of sockets) if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  for (const ws of sockets) if (ws.readyState === WebSocket.OPEN) {
+    try { ws.send(JSON.stringify(payload)); L('->', 'messageCreate forwarded'); } catch {}
+  }
 });
 
-const wss = new WebSocket.Server({ port: PORT }, () => {
-  log(`WebSocket server listening on ws://localhost:${PORT}`);
-});
+const wss = new WebSocket.Server({ port: PORT }, () => L(`WebSocket listening on ws://localhost:${PORT}`));
 
 wss.on('connection', async (ws, req) => {
   sockets.add(ws);
-  log('WS client connected from', req.socket.remoteAddress);
+  L('Client connected from', req.socket.remoteAddress);
 
-  // send immediate status
-  try {
-    ws.send(JSON.stringify({ type: 'bridgeStatus', bridgeConnected: true, discordReady: !!client.user }));
-  } catch (e) {}
-
-  // send initial guildChannels immediately if available
-  if (client.user) {
-    await sendGuildChannels(ws);
-  }
+  // Immediately send bridge status + guild list
+  await sendBridgeStatus(ws);
+  await sendGuildChannels(ws);
 
   ws.on('message', async raw => {
     let msg;
-    try { msg = JSON.parse(raw.toString()); } catch (e) { log('bad JSON from client:', e); return; }
+    try { msg = JSON.parse(raw.toString()); } catch (e) { L('bad JSON from client', e); return; }
+    L('<-', 'received from client', msg.type || '(unknown)', msg);
 
     if (msg.type === 'ping') {
-      try { ws.send(JSON.stringify({ type: 'pong', ts: Date.now() })); } catch (e) {}
+      try { ws.send(JSON.stringify({ type: 'pong', ts: Date.now() })); L('->', 'pong'); } catch (e) { L('pong send failed', e); }
       return;
     }
 
@@ -99,44 +104,34 @@ wss.on('connection', async (ws, req) => {
       try {
         const guild = client.guilds.cache.find(g => g.name === guildName || g.id === guildName);
         if (!guild) throw new Error('Guild not found: ' + guildName);
-        // ensure channels cached
         try { await guild.channels.fetch(); } catch (e) {}
         const channel = guild.channels.cache.find(c => (c.name === channelName || c.id === channelName) && 'send' in c);
         if (!channel) throw new Error('Channel not found or not text: ' + channelName);
         await channel.send(String(content || ''));
         ws.send(JSON.stringify({ type: 'ack', ok: true, ref: msg.ref ?? null }));
-        log(`Sent message to ${guildName}/${channelName}`);
+        L('->', `ack ok (sent to ${guildName}/${channelName})`);
       } catch (e) {
-        log('sendMessage error:', e);
-        try { ws.send(JSON.stringify({ type: 'ack', ok: false, error: String(e), ref: msg.ref ?? null })); } catch {}
+        ws.send(JSON.stringify({ type: 'ack', ok: false, error: String(e), ref: msg.ref ?? null }));
+        L('sendMessage error', e.message || e);
       }
       return;
     }
 
-    // unknown
-    try { ws.send(JSON.stringify({ type: 'error', error: 'unknown-request' })); } catch {}
+    // unknown request
+    try { ws.send(JSON.stringify({ type: 'error', error: 'unknown-request', raw: msg })); } catch (e) {}
   });
 
   ws.on('close', (code, reason) => {
     sockets.delete(ws);
-    log(`WS client disconnected (code=${code} reason=${String(reason)})`);
+    L(`Client disconnected (code=${code}, reason=${String(reason)})`);
   });
 
   ws.on('error', err => {
-    log('WS client error:', err);
+    L('ws error', err);
   });
 });
 
-process.on('uncaughtException', err => {
-  console.error('Uncaught exception:', err);
-});
-process.on('unhandledRejection', err => {
-  console.error('Unhandled rejection:', err);
-});
-
-// login
 client.login(process.env.DISCORD_TOKEN).catch(e => {
   console.error('[Discord] Login failed:', e && e.message ? e.message : e);
-  // don't exit immediately if you want to debug; but if you prefer crash, uncomment:
-  // process.exit(1);
+  // keep server running for debug
 });

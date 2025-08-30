@@ -1,4 +1,4 @@
-// disclinkextension.js (load in TurboWarp)
+// disclinkextension.js — verbose, for TurboWarp (load in browser)
 class DiscordLink {
   constructor(runtime) {
     this.runtime = runtime;
@@ -6,8 +6,7 @@ class DiscordLink {
     this.connected = false;
     this.discordReady = false;
     this.guilds = [];
-    this.channels = {}; // serverName -> array of channel names
-    this.lastRaw = null;
+    this.channels = {};
     this.reconnectDelay = 2000;
     this.reconnectTimer = null;
   }
@@ -31,18 +30,20 @@ class DiscordLink {
     };
   }
 
-  _log(...args) { try { console.log('[DiscordLink extension]', ...args); } catch(e){} }
+  _log(...args) { try { console.log('[DiscordLink ext]', ...args); } catch(e) {} }
 
   connect({ URL }) {
-    // close existing
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-      try { this.ws.close(); } catch (e) {}
+    // close old
+    if (this.ws) {
+      try { this.ws.close(); } catch(e) {}
+      this.ws = null;
     }
 
+    this._log('connecting to', URL);
     try {
       this.ws = new WebSocket(URL);
     } catch (e) {
-      this._log('WebSocket constructor failed:', e);
+      this._log('WebSocket constructor failed', e);
       return;
     }
 
@@ -50,42 +51,27 @@ class DiscordLink {
       this._log('ws open');
       this.connected = true;
       this.discordReady = false;
-      // request guilds immediately
-      this.refreshServers();
-      // clear reconnect if any
+      // send ping and request guilds
+      try { this.ws.send(JSON.stringify({ type: 'ping' })); } catch(e){ this._log('ping send failed', e); }
+      try { this.ws.send(JSON.stringify({ type: 'getGuildChannels' })); } catch(e){ this._log('getGuildChannels send failed', e); }
+      // cancel reconnect
       if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     };
 
-    this.ws.onclose = (ev) => {
-      this._log('ws closed', ev.code, ev.reason);
-      this.connected = false;
-      this.discordReady = false;
-      // try reconnect after delay
-      if (!this.reconnectTimer) {
-        this.reconnectTimer = setTimeout(() => {
-          this._log('attempting reconnect...');
-          try { this.connect({ URL }); } catch(e) { this._log('reconnect failed', e); }
-        }, this.reconnectDelay);
-      }
-    };
-
-    this.ws.onerror = (ev) => {
-      this._log('ws error', ev);
-    };
-
     this.ws.onmessage = (ev) => {
-      this.lastRaw = ev.data;
+      this._log('raw message', ev.data && ev.data.toString ? ev.data.toString().slice(0,1000) : ev.data);
       let msg;
-      try { msg = JSON.parse(ev.data); } catch (e) { this._log('invalid JSON', e); return; }
+      try { msg = JSON.parse(ev.data); } catch (e) { this._log('JSON parse failed', e); return; }
 
       if (msg.type === 'bridgeStatus') {
-        this.connected = !!msg.bridgeConnected;
-        this.discordReady = !!msg.discordReady;
         this._log('bridgeStatus', msg);
+        this.connected = !!msg.bridgeConnected;
+        // if server told us discordReady, use it; otherwise we still wait for guildChannels
+        if (typeof msg.discordReady !== 'undefined') this.discordReady = !!msg.discordReady;
       }
 
       if (msg.type === 'guildChannels') {
-        this._log('got guildChannels, length=', Array.isArray(msg.data) ? msg.data.length : '!', msg);
+        this._log('guildChannels received. count=', Array.isArray(msg.data) ? msg.data.length : '!', msg);
         this.discordReady = true;
         this.guilds = (msg.data || []).map(g => g.guildName || 'Unknown');
         this.channels = {};
@@ -98,7 +84,26 @@ class DiscordLink {
         this._log('pong', msg.ts);
       }
 
-      // ack and other messages can be inspected in console if needed
+      if (msg.type === 'ack') {
+        this._log('ack', msg);
+      }
+    };
+
+    this.ws.onclose = (ev) => {
+      this._log('ws closed', ev.code, ev.reason);
+      this.connected = false;
+      this.discordReady = false;
+      // attempt reconnect once after delay
+      if (!this.reconnectTimer) {
+        this.reconnectTimer = setTimeout(() => {
+          this._log('reconnect attempt');
+          try { this.connect({ URL }); } catch(e){ this._log('reconnect failed', e); }
+        }, this.reconnectDelay || 2000);
+      }
+    };
+
+    this.ws.onerror = (ev) => {
+      this._log('ws error', ev);
     };
   }
 
@@ -113,20 +118,18 @@ class DiscordLink {
   // actions
   refreshServers() {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try { this.ws.send(JSON.stringify({ type: 'getGuildChannels' })); } catch(e){ this._log('send failed', e); }
+      try { this.ws.send(JSON.stringify({ type: 'getGuildChannels' })); } catch(e){ this._log('refresh send failed', e); }
+    } else {
+      this._log('refreshServers called but WS not open');
     }
   }
   refreshChannels({ SERVER }) { this.refreshServers(); }
 
   sendMessage({ CONTENT, CHANNEL, SERVER }) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(JSON.stringify({ type: 'sendMessage', guildName: SERVER, channelName: CHANNEL, content: CONTENT }));
-      } catch (e) { this._log('sendMessage failed', e); }
-    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { this._log('sendMessage: ws not open'); return; }
+    try { this.ws.send(JSON.stringify({ type: 'sendMessage', guildName: SERVER, channelName: CHANNEL, content: CONTENT })); } catch(e) { this._log('sendMessage failed', e); }
   }
 
-  // convenience
   mentionUser({ ID }) { return `<@${ID}>`; }
 }
 
