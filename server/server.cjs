@@ -1,4 +1,3 @@
-// server.cjs
 require("dotenv").config();
 const WebSocket = require("ws");
 const { Client } = require("discord.js-selfbot-v13");
@@ -9,12 +8,12 @@ if (!PORT) {
   process.exit(1);
 }
 
-// --- Discord Client Setup ---
+// Discord client
 const client = new Client();
 const cache = { ready: false, servers: [] };
 let sockets = [];
 
-// --- Broadcast helper ---
+// --- Helper: broadcast to all WS clients ---
 function broadcast(obj) {
   const msg = JSON.stringify(obj);
   sockets.forEach(ws => {
@@ -27,42 +26,34 @@ async function refreshCache() {
   console.log("[Discord] Refreshing server cache...");
   cache.servers = [];
 
-  try {
-    for (const [guildId, guild] of client.guilds.cache) {
-      await guild.channels.fetch(); // ensure channels are cached
+  for (const [guildId, guild] of client.guilds.cache) {
+    try {
+      await guild.channels.fetch();
       const textChannels = guild.channels.cache
         .filter(ch => ch.type === 'text')
         .map(ch => ({ id: ch.id, name: ch.name }));
 
-      cache.servers.push({
-        id: guild.id,
-        name: guild.name,
-        channels: textChannels
-      });
-
+      cache.servers.push({ id: guild.id, name: guild.name, channels: textChannels });
       console.log(`[Discord] Cached guild: ${guild.name} (${textChannels.length} channels)`);
+
+      // Broadcast partial server list as it comes
+      broadcast({ type: "serverPartial", guild: { id: guild.id, name: guild.name, channels: textChannels } });
+    } catch (err) {
+      console.error(`[Discord] Failed to fetch channels for ${guild.name}:`, err);
     }
-
-    cache.ready = true;
-    broadcast({ type: "ready", value: true });
-    sendServerList();
-    console.log("[Discord] Cache complete. Ready state sent.");
-
-  } catch (err) {
-    console.error("[Discord] Failed to cache servers/channels:", err);
-    cache.ready = false;
-    broadcast({ type: "ready", value: false });
   }
+
+  cache.ready = true;
+  broadcast({ type: "ready", value: true });
+  sendServerList();
+  console.log("[Discord] Cache complete. Ready state sent.");
 }
 
-// --- Send server list ---
+// --- Send full server list ---
 function sendServerList(target) {
   const payload = { type: "serverList", servers: cache.servers };
-  if (target) {
-    target.send(JSON.stringify(payload));
-  } else {
-    broadcast(payload);
-  }
+  if (target) target.send(JSON.stringify(payload));
+  else broadcast(payload);
 }
 
 // --- Send message to Discord ---
@@ -81,7 +72,7 @@ async function sendMessageToDiscord(serverName, channelName, text) {
   }
 }
 
-// --- Handle WebSocket connections ---
+// --- WebSocket server ---
 const wss = new WebSocket.Server({ port: PORT }, () => {
   console.log(`[Server] Bridge running on ws://0.0.0.0:${PORT}`);
 });
@@ -98,22 +89,18 @@ wss.on("connection", ws => {
   ws.on("message", async raw => {
     try {
       const msg = JSON.parse(raw.toString());
-
       switch (msg.type) {
         case "refreshServers":
           await refreshCache();
           break;
-
         case "getChannels":
           const guild = cache.servers.find(s => s.id === msg.guildId || s.name === msg.guildId);
           if (guild) ws.send(JSON.stringify({ type: "channelList", guildId: guild.id, data: guild.channels }));
           break;
-
         case "sendMessage":
           await sendMessageToDiscord(msg.server, msg.channel, msg.text);
           break;
       }
-
     } catch (err) {
       console.error("[WS] Error handling message:", err);
     }
@@ -122,11 +109,11 @@ wss.on("connection", ws => {
   // Send current ready state immediately
   ws.send(JSON.stringify({ type: "ready", value: cache.ready }));
 
-  // Send server list if already cached
+  // Send full server list if already cached
   if (cache.ready && cache.servers.length > 0) sendServerList(ws);
 });
 
-// --- Forward Discord messages to WS ---
+// --- Forward Discord messages ---
 client.on("messageCreate", msg => {
   if (!msg.guild || !msg.channel) return;
   const payload = {
@@ -142,9 +129,12 @@ client.on("messageCreate", msg => {
   broadcast(payload);
 });
 
-// --- Login ---
+// --- Discord login ---
 client.login(process.env.TOKEN)
-  .then(() => console.log("[Discord] Logged in"))
+  .then(() => {
+    console.log(`[Discord] Logged in as ${client.user.username}`);
+    refreshCache(); // fetch servers/channels after login
+  })
   .catch(err => {
     console.error("[Discord] Login failed:", err);
     process.exit(1);
