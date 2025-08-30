@@ -1,160 +1,132 @@
-// server.cjs — incremental, concurrency-limited guild/channel sender
+// server.cjs
 require('dotenv').config();
 const WebSocket = require('ws');
-const { Client } = require('discord.js-selfbot-v13');
+const { Client, Partials } = require('discord.js-selfbot-v13');
 
 const PORT = Number(process.env.PORT || 3001);
-const client = new Client();
+const client = new Client({
+  partials: [Partials.Channel]
+});
 const sockets = new Set();
-
-function L(...args){ console.log('[bridge]', ...args); }
-
-// Simple concurrency limiter
-async function pMapLimit(inputs, mapper, limit = 5) {
-  const results = [];
-  const executing = [];
-  for (const input of inputs) {
-    const p = Promise.resolve().then(() => mapper(input));
-    results.push(p);
-
-    executing.push(p);
-    if (executing.length >= limit) {
-      await Promise.race(executing).catch(()=>{}); // wait for first to resolve
-      // remove settled promises
-      for (let i = executing.length - 1; i >= 0; --i) {
-        if (executing[i].isFulfilled || executing[i].isRejected) {
-          executing.splice(i, 1);
-        }
-      }
-      // NOTE: Node Promises don't have isFulfilled by default. We wrap to mark settled below.
-    }
-  }
-  return Promise.all(results);
-}
-
-// small wrapper to mark settled state (because plain Promise doesn't expose isFulfilled)
-function makeTrackedPromise(p) {
-  const t = { p, isSettled: false };
-  t.p = p.then(
-    (v) => { t.isSettled = true; return v; },
-    (e) => { t.isSettled = true; throw e; }
-  );
-  return t;
-}
-
-// concurrency-limited mapper helper using tracked promises
-async function mapWithLimit(items, mapper, limit = 5) {
-  const results = [];
-  const queue = []; // tracked promises
-  for (const item of items) {
-    const tracked = makeTrackedPromise(mapper(item));
-    results.push(tracked.p);
-    queue.push(tracked);
-    if (queue.length >= limit) {
-      // wait until one settles
-      await Promise.race(queue.map(x => x.p)).catch(()=>{});
-      // drop settled
-      for (let i = queue.length - 1; i >= 0; --i) {
-        if (queue[i].isSettled) queue.splice(i, 1);
-      }
-    }
-  }
-  return Promise.all(results);
-}
-
-// Simple in-memory cache: guildId -> { fetchedAt, channels: [{id,name,type}] }
 const guildCache = new Map();
 const CACHE_TTL_MS = 1000 * 60 * 3; // 3 minutes
 
-async function ensureGuildsCached() {
+function log(...args){ console.log('[bridge]', ...args); }
+
+async function fetchGuildChannels(guild){
   try {
-    if (!client.guilds || client.guilds.cache.size === 0) {
-      L('guild cache empty — attempting client.guilds.fetch()');
-      try { await client.guilds.fetch(); } catch(e){ L('client.guilds.fetch() failed (nonfatal):', e && e.message ? e.message : e); }
-    }
-  } catch (e) { L('ensureGuildsCached error', e); }
+    await guild.channels.fetch();
+    const channels = guild.channels.cache.map(c => ({ id: c.id, name: c.name, type: c.type }));
+    guildCache.set(guild.id, { fetchedAt: Date.now(), channels });
+    return { guildId: guild.id, guildName: guild.name, channels };
+  } catch(e){
+    log('Failed fetching channels for', guild.name, e.message);
+    return { guildId: guild.id, guildName: guild.name, channels: [] };
+  }
 }
 
-// New: incremental send function
-async function sendGuildChannelsIncremental(ws, options = { forceRefresh: false, concurrency: 5 }) {
+async function sendGuildChannelsIncremental(ws, force=false){
   try {
-    if (!client.user) {
-      ws.send(JSON.stringify({ type: 'guildChannels', data: [], info: 'discord-not-ready' }));
-      L('-> guildChannels: discord not ready');
+    if(!client.user){
+      ws.send(JSON.stringify({ type:'guildChannels', data: [], info:'discord-not-ready' }));
       return;
     }
 
-    await ensureGuildsCached();
+    // fast guild summary
+    const guilds = Array.from(client.guilds.cache.values());
+    ws.send(JSON.stringify({ type:'guildSummary', data: guilds.map(g=>({guildId:g.id,guildName:g.name})) }));
 
-    // Build lightweight guild summary to send immediately
-    const guildSummaries = [];
-    for (const [id, guild] of client.guilds.cache) {
-      guildSummaries.push({ guildId: guild.id, guildName: guild.name });
-    }
-
-    // Send the fast summary so extension can show guild names quickly
-    try {
-      ws.send(JSON.stringify({ type: 'guildSummary', data: guildSummaries }));
-      L('-> guildSummary (sent', guildSummaries.length, 'guilds)');
-    } catch (e) {
-      L('send guildSummary failed', e);
-    }
-
-    // Prepare list of guilds to fetch channels for
-    const guildList = Array.from(client.guilds.cache.values());
-
-    // mapper fetches channels for one guild and sends a partial message when ready
-    const mapper = async (guild) => {
-      const guildId = guild.id;
-      // Use cache unless forceRefresh or expired
-      const cached = guildCache.get(guildId);
+    // fetch channels incrementally
+    for(const guild of guilds){
+      const cached = guildCache.get(guild.id);
       const now = Date.now();
-      if (!options.forceRefresh && cached && (now - cached.fetchedAt) < CACHE_TTL_MS) {
-        // send cached partial quickly
-        try {
-          ws.send(JSON.stringify({ type: 'guildChannelsPartial', guild: { guildId, guildName: guild.name, channels: cached.channels } }));
-          L(`-> guildChannelsPartial (from cache) for ${guild.name} (${guild.id}) — ${cached.channels.length} channels`);
-        } catch (e) { L('send cached partial failed', e); }
-        return { guildId, fromCache: true };
+      if(!force && cached && (now - cached.fetchedAt) < CACHE_TTL_MS){
+        ws.send(JSON.stringify({ type:'guildChannelsPartial', guild: cached }));
+        continue;
       }
+      const data = await fetchGuildChannels(guild);
+      ws.send(JSON.stringify({ type:'guildChannelsPartial', guild: data }));
+    }
 
-      // fetch channel cache for this guild
-      try {
-        await guild.channels.fetch();
-      } catch (e) {
-        L(`channels.fetch failed for guild ${guild.name} (${guild.id}):`, e && e.message ? e.message : e);
-      }
+    ws.send(JSON.stringify({ type:'guildChannelsComplete', ts: Date.now() }));
 
-      // gather text-like channels only (lightweight)
-      const channels = guild.channels.cache
-        .filter(c => c && typeof c.name === 'string')
-        .map(c => ({ id: c.id, name: c.name, type: c.type }));
-
-      // update cache
-      guildCache.set(guildId, { fetchedAt: Date.now(), channels });
-
-      // send partial for this guild
-      try {
-        ws.send(JSON.stringify({ type: 'guildChannelsPartial', guild: { guildId, guildName: guild.name, channels } }));
-        L(`-> guildChannelsPartial for ${guild.name} (${guild.id}) — ${channels.length} channels`);
-      } catch (e) {
-        L('send partial failed', e);
-      }
-
-      return { guildId, fromCache: false };
-    };
-
-    // Process guilds with concurrency limit
-    await mapWithLimit(guildList, mapper, options.concurrency || 5);
-
-    // After all partials are sent, inform client we are done
-    try {
-      ws.send(JSON.stringify({ type: 'guildChannelsComplete', ts: Date.now() }));
-      L('-> guildChannelsComplete');
-    } catch (e) { L('send complete failed', e); }
-
-  } catch (e) {
-    L('sendGuildChannelsIncremental error', e && e.message ? e.message : e);
-    try { ws.send(JSON.stringify({ type: 'guildChannels', error: String(e) })); } catch {}
+  } catch(e){
+    log('sendGuildChannelsIncremental error', e.message);
+    ws.send(JSON.stringify({ type:'guildChannels', error:String(e) }));
   }
 }
+
+// login selfbot
+client.login(process.env.DISCORD_TOKEN).catch(e=>{
+  log('Login failed:', e.message);
+  process.exit(1);
+});
+
+client.on('ready', () => log('[Discord] Logged in as', client.user.tag));
+
+// forward messages to all connected clients
+client.on('messageCreate', msg=>{
+  const payload = {
+    type: 'messageCreate',
+    data: {
+      messageId: msg.id,
+      content: msg.content || '',
+      author: { id: msg.author.id, username: msg.author.username, bot: msg.author.bot },
+      channelId: msg.channel.id,
+      channelName: msg.channel.name || '',
+      channelType: msg.channel.type,
+      guildId: msg.guild?.id || '',
+      guildName: msg.guild?.name || '',
+      createdTimestamp: msg.createdTimestamp
+    }
+  };
+  for(const ws of sockets){
+    if(ws.readyState === ws.OPEN) ws.send(JSON.stringify(payload));
+  }
+});
+
+// WebSocket server
+const wss = new WebSocket.Server({ port: PORT });
+
+wss.on('connection', async ws=>{
+  sockets.add(ws);
+  log('[WS] Client connected');
+
+  // send bridge status immediately
+  ws.send(JSON.stringify({ type:'bridgeStatus', bridgeConnected:true, discordReady:!!client.user }));
+
+  // send incremental guilds
+  await sendGuildChannelsIncremental(ws);
+
+  ws.on('message', async raw=>{
+    let msg;
+    try{ msg = JSON.parse(raw.toString()); } catch{return;}
+
+    // send message
+    if(msg?.type === 'sendMessage'){
+      const { guildName, channelName, content } = msg;
+      if(!guildName || !channelName) return;
+      try{
+        const guild = client.guilds.cache.find(g => g.name === guildName);
+        if(!guild) throw new Error('Guild not found');
+        await guild.channels.fetch();
+        const channel = guild.channels.cache.find(c => c.name === channelName);
+        if(!channel || !('send' in channel)) throw new Error('Channel not found or not text');
+        await channel.send(String(content||''));
+        ws.send(JSON.stringify({ type:'ack', ref: msg.ref??null, ok:true }));
+      } catch(e){
+        ws.send(JSON.stringify({ type:'ack', ref: msg.ref??null, ok:false, error:String(e) }));
+      }
+    }
+
+    // refresh channels
+    if(msg?.type === 'getGuildChannels'){
+      await sendGuildChannelsIncremental(ws, !!msg.force);
+    }
+  });
+
+  ws.on('close', ()=>{ sockets.delete(ws); log('[WS] Client disconnected'); });
+  ws.on('error', e=>log('WS error', e.message));
+});
+
+log(`[WS] Bridge listening on ws://localhost:${PORT}`);
