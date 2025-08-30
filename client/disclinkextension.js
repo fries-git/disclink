@@ -1,3 +1,4 @@
+// disclinkextension.js (load in TurboWarp)
 class DiscordLink {
   constructor(runtime) {
     this.runtime = runtime;
@@ -6,6 +7,9 @@ class DiscordLink {
     this.discordReady = false;
     this.guilds = [];
     this.channels = {}; // serverName -> array of channel names
+    this.lastRaw = null;
+    this.reconnectDelay = 2000;
+    this.reconnectTimer = null;
   }
 
   getInfo() {
@@ -27,71 +31,102 @@ class DiscordLink {
     };
   }
 
+  _log(...args) { try { console.log('[DiscordLink extension]', ...args); } catch(e){} }
+
   connect({ URL }) {
-    if (this.ws) this.ws.close();
-    this.ws = new WebSocket(URL);
+    // close existing
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      try { this.ws.close(); } catch (e) {}
+    }
+
+    try {
+      this.ws = new WebSocket(URL);
+    } catch (e) {
+      this._log('WebSocket constructor failed:', e);
+      return;
+    }
 
     this.ws.onopen = () => {
+      this._log('ws open');
       this.connected = true;
+      this.discordReady = false;
+      // request guilds immediately
       this.refreshServers();
+      // clear reconnect if any
+      if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (ev) => {
+      this._log('ws closed', ev.code, ev.reason);
       this.connected = false;
       this.discordReady = false;
-      this.guilds = [];
-      this.channels = {};
+      // try reconnect after delay
+      if (!this.reconnectTimer) {
+        this.reconnectTimer = setTimeout(() => {
+          this._log('attempting reconnect...');
+          try { this.connect({ URL }); } catch(e) { this._log('reconnect failed', e); }
+        }, this.reconnectDelay);
+      }
     };
 
-    this.ws.onmessage = ev => {
-      try {
-        const msg = JSON.parse(ev.data);
+    this.ws.onerror = (ev) => {
+      this._log('ws error', ev);
+    };
 
-        if (msg.type === 'bridgeStatus') {
-          this.connected = !!msg.bridgeConnected;
-          this.discordReady = !!msg.discordReady;
-        }
+    this.ws.onmessage = (ev) => {
+      this.lastRaw = ev.data;
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { this._log('invalid JSON', e); return; }
 
-        if (msg.type === 'guildChannels') {
-          this.discordReady = true;
-          this.guilds = msg.data.map(g => g.guildName || 'Unknown');
-          this.channels = {};
-          msg.data.forEach(g => {
-            this.channels[g.guildName] = g.channels.map(c => c.name || '');
-          });
-        }
-
-        if (msg.type === 'ack') {
-          // optional: handle message send acknowledgment
-        }
-
-      } catch (e) {
-        console.error('WS parse error', e);
+      if (msg.type === 'bridgeStatus') {
+        this.connected = !!msg.bridgeConnected;
+        this.discordReady = !!msg.discordReady;
+        this._log('bridgeStatus', msg);
       }
+
+      if (msg.type === 'guildChannels') {
+        this._log('got guildChannels, length=', Array.isArray(msg.data) ? msg.data.length : '!', msg);
+        this.discordReady = true;
+        this.guilds = (msg.data || []).map(g => g.guildName || 'Unknown');
+        this.channels = {};
+        (msg.data || []).forEach(g => {
+          this.channels[g.guildName] = (g.channels || []).map(c => c.name || '');
+        });
+      }
+
+      if (msg.type === 'pong') {
+        this._log('pong', msg.ts);
+      }
+
+      // ack and other messages can be inspected in console if needed
     };
   }
 
-  // Booleans
+  // booleans
   isConnected() { return !!this.connected; }
   isDiscordReady() { return !!this.discordReady; }
 
-  // Reporters
-  getGuilds() { return this.guilds.join(', ') || "No servers"; }
-  getChannels({ SERVER }) { return this.channels[SERVER]?.join(', ') || "No channels"; }
+  // reporters
+  getGuilds() { return this.guilds.join(', ') || 'No servers'; }
+  getChannels({ SERVER }) { return this.channels[SERVER]?.join(', ') || 'No channels'; }
 
-  // Refresh
+  // actions
   refreshServers() {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'getGuildChannels' }));
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try { this.ws.send(JSON.stringify({ type: 'getGuildChannels' })); } catch(e){ this._log('send failed', e); }
+    }
   }
   refreshChannels({ SERVER }) { this.refreshServers(); }
 
-  // Send message
   sendMessage({ CONTENT, CHANNEL, SERVER }) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify({ type: 'sendMessage', guildName: SERVER, channelName: CHANNEL, content: CONTENT }));
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({ type: 'sendMessage', guildName: SERVER, channelName: CHANNEL, content: CONTENT }));
+      } catch (e) { this._log('sendMessage failed', e); }
+    }
   }
 
-  // Mention user
+  // convenience
   mentionUser({ ID }) { return `<@${ID}>`; }
 }
 
