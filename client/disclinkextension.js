@@ -5,7 +5,6 @@ class DiscordLink {
     this.connected = false;
     this.discordReady = false;
     this.guilds = [];
-    this.messages = [];
   }
 
   getInfo() {
@@ -43,10 +42,11 @@ class DiscordLink {
         {
           opcode: 'sendMessage',
           blockType: 'command',
-          text: 'send [TEXT] to channel [CHANNEL]',
+          text: 'send [TEXT] in channel [CHANNEL] of server [SERVER]',
           arguments: {
             TEXT: { type: 'string', defaultValue: 'Hello world!' },
-            CHANNEL: { type: 'string', defaultValue: '' }
+            CHANNEL: { type: 'string', defaultValue: '' },
+            SERVER: { type: 'string', defaultValue: '' }
           }
         },
         {
@@ -72,6 +72,7 @@ class DiscordLink {
     this.ws.onmessage = ev => {
       const msg = JSON.parse(ev.data);
       if (msg.type === 'bridgeStatus') {
+        this.connected = true;
         this.discordReady = msg.discordReady;
       }
       if (msg.type === 'discordReady') {
@@ -83,13 +84,8 @@ class DiscordLink {
     };
   }
 
-  isConnected() {
-    return this.connected;
-  }
-
-  isDiscordReady() {
-    return this.discordReady;
-  }
+  isConnected() { return this.connected; }
+  isDiscordReady() { return this.discordReady; }
 
   getGuilds() {
     return this.guilds.map(g => g.guildName).join(', ');
@@ -101,11 +97,15 @@ class DiscordLink {
     return guild.channels.map(c => c.name).join(', ');
   }
 
-  sendMessage({ TEXT, CHANNEL }) {
+  sendMessage({ TEXT, CHANNEL, SERVER }) {
     if (!this.ws) return;
-    // auto translate @username style to <@id> (if id is provided in text)
-    let fixed = TEXT.replace(/@(\d{5,})/g, '<@$1>');
-    this.ws.send(JSON.stringify({ type: 'sendMessage', channelId: CHANNEL, content: fixed }));
+    let fixed = TEXT.replace(/@(\d{5,})/g, '<@$1>'); // auto format @id
+    this.ws.send(JSON.stringify({
+      type: 'sendMessage',
+      guildName: SERVER,
+      channelName: CHANNEL,
+      content: fixed
+    }));
   }
 
   mentionUser({ ID }) {
