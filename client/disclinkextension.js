@@ -1,21 +1,15 @@
 // disclinkextension.js
-// TurboWarp/Scratch extension for the bridge.
-// - sends ref per send
-// - uses IDs when available
-// - lastMessage uses displayText (or attachment url) to avoid invisible messages
-// - has whenMessageReceived & whenPinged hats
-
 class DiscordLink {
   constructor(runtime) {
     this.runtime = runtime;
-    this.VERSION = '3.0.0';
+    this.VERSION = '4.0.0';
     this.ws = null;
     this.connected = false;
     this.discordReady = false;
     this.guilds = []; // [{id,name}]
     this.channels = {}; // guildId -> [{id,name}]
     this._lastMessage = { content:'', channelName:'', guildName:'', authorName:'', authorId:'', timestamp:0, firstAttachmentUrl:'', fromSelf:false };
-    this._lastPing = { pinged:false, from:'', content:'', timestamp:0 };
+    this._lastPing = { pinged:false, from:'', fromId:'', guildName:'', channelName:'', content:'', timestamp:0 };
     this.reconnectDelay = 2000;
   }
 
@@ -30,7 +24,6 @@ class DiscordLink {
         { opcode:'isDiscordReady', blockType:'Boolean', text:'discord ready?' },
         { opcode:'getGuilds', blockType:'reporter', text:'server list' },
         { opcode:'getChannels', blockType:'reporter', text:'channels in server [SERVER]', arguments:{ SERVER:{ type:'string', defaultValue:'' } } },
-        { opcode:'refreshServers', blockType:'command', text:'refresh servers' },
         { opcode:'sendMessage', blockType:'command', text:'send [CONTENT] to [CHANNEL] in server [SERVER]', arguments:{ CONTENT:{type:'string',defaultValue:''}, CHANNEL:{type:'string',defaultValue:''}, SERVER:{type:'string',defaultValue:''} } },
         { opcode:'whenMessageReceived', blockType:'hat', text:'when message received' },
         { opcode:'lastMessage', blockType:'reporter', text:'last message text' },
@@ -38,21 +31,21 @@ class DiscordLink {
         { opcode:'lastMessageChannel', blockType:'reporter', text:'last message channel' },
         { opcode:'lastMessageServer', blockType:'reporter', text:'last message server' },
         { opcode:'lastMessageAuthor', blockType:'reporter', text:'last message author' },
-        { opcode:'lastMessageAuthorId', blockType:'reporter', text:'last message author id' },
-        { opcode:'lastMessageTimestamp', blockType:'reporter', text:'last message timestamp' },
         { opcode:'whenPinged', blockType:'hat', text:'when pinged' },
         { opcode:'wasPinged', blockType:'Boolean', text:'was pinged?' },
         { opcode:'lastPingAuthor', blockType:'reporter', text:'last ping author' },
+        { opcode:'lastPingChannel', blockType:'reporter', text:'last ping channel' },
+        { opcode:'lastPingServer', blockType:'reporter', text:'last ping server' },
         { opcode:'lastPingMessage', blockType:'reporter', text:'last ping message' },
         { opcode:'getVersion', blockType:'reporter', text:'extension version' }
       ]
     };
   }
 
-  _log(...args){ try{ console.log('[DiscordLink ext]', ...args); } catch(e) {} }
+  _log(...args){ try { console.log('[DiscordLink ext]', ...args); } catch(e) {} }
 
   connect({ URL }) {
-    if (this.ws) { try { this.ws.close(); } catch(e){} this.ws = null; }
+    if (this.ws) { try { this.ws.close(); } catch(e) {} this.ws = null; }
     this._log('connect to', URL);
     try { this.ws = new WebSocket(URL); } catch(e) { this._log('WS ctor failed', e); return; }
 
@@ -66,35 +59,20 @@ class DiscordLink {
       let msg;
       try { msg = JSON.parse(ev.data); } catch(e) { this._log('parse fail', e); return; }
 
-      if (msg.type === 'bridgeStatus') {
-        this.connected = !!msg.bridgeConnected;
-      }
-
-      if (msg.type === 'ready') {
-        this.discordReady = !!msg.value;
-        this._log('discordReady', this.discordReady);
-      }
+      if (msg.type === 'bridgeStatus') this.connected = !!msg.bridgeConnected;
+      if (msg.type === 'ready') { this.discordReady = !!msg.value; this._log('discordReady', this.discordReady); }
 
       if (msg.type === 'serverPartial') {
-        const g = msg.guild;
-        if (!g) return;
-        this.guilds = this.guilds.filter(x => x.id !== g.id).concat({ id: g.id, name: g.name });
-        this.channels[g.id] = (g.channels || []).map(c => ({ id: c.id, name: c.name }));
+        const g = msg.guild; if (!g) return;
+        this.guilds = this.guilds.filter(x=>x.id!==g.id).concat({ id:g.id, name:g.name });
+        this.channels[g.id] = (g.channels||[]).map(c=>({ id:c.id, name:c.name }));
       }
 
       if (msg.type === 'serverList') {
-        this.guilds = (msg.servers || []).map(s => ({ id: s.id, name: s.name }));
+        this.guilds = (msg.servers||[]).map(s=>({ id:s.id, name:s.name }));
         this.channels = {};
-        (msg.servers || []).forEach(s => { this.channels[s.id] = (s.channels || []).map(c => ({ id:c.id, name:c.name })); });
-        this._log('serverList applied; count=', this.guilds.length);
-      }
-
-      if (msg.type === 'channelList') {
-        this.channels[msg.guildId] = (msg.data || []).map(c => ({ id: c.id, name: c.name }));
-      }
-
-      if (msg.type === 'ack') {
-        this._log('ack', msg);
+        (msg.servers||[]).forEach(s=> this.channels[s.id] = (s.channels||[]).map(c=>({ id:c.id, name:c.name })));
+        this._log('serverList applied count=', this.guilds.length);
       }
 
       if (msg.type === 'message') {
@@ -112,8 +90,7 @@ class DiscordLink {
           timestamp: d.timestamp || Date.now(),
           firstAttachmentUrl: firstAttachment,
           fromSelf: !!d.fromSelf,
-          rawContent: String(d.rawContent || ''),
-          pinged: !!d.pinged
+          rawContent: String(d.rawContent || '')
         };
 
         this._log('lastMessage updated', this._lastMessage);
@@ -135,6 +112,7 @@ class DiscordLink {
         try { if (this.runtime && typeof this.runtime.startHats === 'function') this.runtime.startHats('whenPinged', {}); } catch(e) { this._log('startHats fail', e); }
       }
 
+      if (msg.type === 'ack') this._log('ack', msg);
       if (msg.type === 'pong') this._log('pong', msg.ts);
     };
 
@@ -142,7 +120,7 @@ class DiscordLink {
       this._log('ws closed', ev && ev.code, ev && ev.reason);
       this.connected = false;
       this.discordReady = false;
-      setTimeout(()=>{ try { this.connect({ URL }); } catch(e){} }, this.reconnectDelay);
+      setTimeout(()=>{ try{ this.connect({ URL }); } catch(e){} }, this.reconnectDelay);
     };
 
     this.ws.onerror = (err) => { this._log('ws error', err); };
@@ -151,19 +129,14 @@ class DiscordLink {
   isConnected(){ return !!this.connected; }
   isDiscordReady(){ return !!this.discordReady; }
 
-  getGuilds(){ return this.guilds.map(g => g.name).join(', ') || 'No servers'; }
+  getGuilds(){ return this.guilds.map(g=>g.name).join(', ') || 'No servers'; }
   getChannels({ SERVER }) {
-    const guild = this.guilds.find(g => g.name === SERVER || g.id === SERVER);
+    const guild = this.guilds.find(g=>g.name===SERVER || g.id===SERVER);
     if (!guild) return 'No channels';
-    return (this.channels[guild.id] || []).map(c => c.name).join(', ') || 'No channels';
+    return (this.channels[guild.id]||[]).map(c=>c.name).join(', ') || 'No channels';
   }
 
-  refreshServers() {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try { this.ws.send(JSON.stringify({ type: 'getServerList', force: true })); } catch(e) { this._log('refresh send failed', e); }
-    } else this._log('refreshServers: ws not open');
-  }
-
+  // sendMessage prefers IDs when available and always sends a ref for idempotency
   sendMessage({ CONTENT, CHANNEL, SERVER }) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) { this._log('sendMessage: ws not open'); return; }
     const guild = this.guilds.find(g => g.name === SERVER || g.id === SERVER);
@@ -182,6 +155,13 @@ class DiscordLink {
     try { this.ws.send(JSON.stringify(payload)); this._log('sendMessage payload', payload); } catch(e) { this._log('sendMessage failed', e); }
   }
 
+  refreshServers() {
+    // sending getServerList will not trigger rebuild on server; server serves persisted cache only
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try { this.ws.send(JSON.stringify({ type:'getServerList' })); } catch(e) { this._log('refresh failed', e); }
+    } else this._log('refreshServers: ws not open');
+  }
+
   // reporters
   lastMessage(){ return String(this._lastMessage.content || ''); }
   lastMessageAttachment(){ return String(this._lastMessage.firstAttachmentUrl || ''); }
@@ -193,6 +173,9 @@ class DiscordLink {
 
   wasPinged(){ return !!(this._lastPing && this._lastPing.pinged); }
   lastPingAuthor(){ return String(this._lastPing.from || ''); }
+  lastPingAuthorId(){ return String(this._lastPing.fromId || ''); }
+  lastPingChannel(){ return String(this._lastPing.channelName || ''); }
+  lastPingServer(){ return String(this._lastPing.guildName || ''); }
   lastPingMessage(){ return String(this._lastPing.content || ''); }
 
   getVersion(){ return String(this.VERSION); }
