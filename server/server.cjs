@@ -1,11 +1,6 @@
 // server.cjs
-// Robust Discord <-> TurboWarp bridge (CommonJS)
-// - never auto-refresh cache after startup (unless you delete cache.json)
-// - text-channel filtering (no VCs/categories)
-// - idempotent sends via ref, persisted processedRefs
-// - guarded queue processing (no duplicate queue runs)
-// - forwards message events with displayText, attachments, timestamp, fromSelf
-// - emits ping events containing who/channel/server/message/timestamp
+// Fixed: discordConnected vs cacheReady separation so "discord ready" shows true
+// and sends aren't queued just because cache isn't built.
 // Requires: npm i discord.js-selfbot-v13 ws dotenv
 
 'use strict';
@@ -19,155 +14,131 @@ const { Client, Intents } = require('discord.js-selfbot-v13');
 const PORT = Number(process.env.PORT || 3001);
 const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
 const CACHE_FILE = path.join(__dirname, 'cache.json');
-const SAVE_DEBOUNCE_MS = 800;
-const DEDUPE_WINDOW_MS = 1500;
-const MAX_SEND_RETRIES = 5;
-const BASE_BACKOFF_MS = 400;
+if (!TOKEN) { console.error('[bridge] DISCORD_TOKEN/TOKEN missing'); process.exit(1); }
 
-if (!TOKEN) {
-  console.error('[bridge] ERROR: DISCORD_TOKEN (or TOKEN) not set in env. Exiting.');
-  process.exit(1);
-}
-
-function log(...args){ console.log('[bridge]', ...args); }
+function log(...a){ console.log('[bridge]', ...a); }
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
 const client = new Client({
-  intents: [
-    Intents.FLAGS.GUILDS,
-    Intents.FLAGS.GUILD_MESSAGES,
-    Intents.FLAGS.MESSAGE_CONTENT
-  ]
+  intents: [ Intents.FLAGS.GUILDS, Intents.FLAGS.GUILD_MESSAGES, Intents.FLAGS.MESSAGE_CONTENT ]
 });
 
 // runtime state
 const state = {
-  ready: false,
-  servers: [],            // [{id,name,channels:[{id,name}]}]
-  queue: [],              // queued sends: { req, tries, queuedAt }
+  discordConnected: false,   // true when client.on('ready') fires
+  cacheReady: false,         // true when server list cache built (optional)
+  servers: [],               // cached server list [{id,name,channels:[{id,name}]}]
+  queue: [],                 // queued sends only when discord NOT connected
   processedRefs: new Set()
 };
 
 let sockets = [];
 let processingQueue = false;
 let cacheBuilding = false;
-const lastMessagePerChannel = new Map();
 let _saveTimer = null;
+const DEDUPE_WINDOW_MS = 1500;
+const lastMessagePerChannel = new Map();
 
-// ---- persistence ----
-function loadStateFromDisk() {
+// --- persistence (cache + processed refs) ---
+function loadCache() {
   try {
     if (!fs.existsSync(CACHE_FILE)) return false;
     const raw = fs.readFileSync(CACHE_FILE, 'utf8');
     const parsed = JSON.parse(raw);
     if (!parsed) return false;
     state.servers = Array.isArray(parsed.servers) ? parsed.servers : [];
-    state.ready = !!parsed.ready;
-    state.queue = Array.isArray(parsed.queue) ? parsed.queue : [];
+    state.cacheReady = !!parsed.cacheReady;
     state.processedRefs = new Set(Array.isArray(parsed.processedRefs) ? parsed.processedRefs : []);
-    log('Loaded cache from disk:', CACHE_FILE, 'servers=', state.servers.length, 'processedRefs=', state.processedRefs.size);
+    log('Loaded cache from disk', CACHE_FILE, 'servers=', state.servers.length);
     return true;
   } catch (e) {
-    log('Failed to load state from disk:', e && e.message ? e.message : e);
+    log('loadCache failed', e && e.message ? e.message : e);
     return false;
   }
 }
 
-function saveStateToDiskDebounced() {
+function saveCacheDebounced() {
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(() => {
     try {
       const tmp = CACHE_FILE + '.tmp';
-      const toSave = {
-        ready: state.ready,
-        servers: state.servers,
-        queue: state.queue,
-        processedRefs: Array.from(state.processedRefs)
-      };
-      fs.writeFileSync(tmp, JSON.stringify(toSave, null, 2), 'utf8');
+      const out = { cacheReady: state.cacheReady, servers: state.servers, processedRefs: Array.from(state.processedRefs) };
+      fs.writeFileSync(tmp, JSON.stringify(out, null, 2), 'utf8');
       fs.renameSync(tmp, CACHE_FILE);
-      log('Saved state to disk:', CACHE_FILE);
+      log('Saved cache to disk');
     } catch (e) {
-      log('Failed to save state to disk:', e && e.message ? e.message : e);
+      log('saveCache failed', e && e.message ? e.message : e);
     }
-  }, SAVE_DEBOUNCE_MS);
+  }, 700);
 }
 
-// ---- websocket helpers ----
-function safeSend(ws, obj) {
-  try { ws.send(JSON.stringify(obj)); }
-  catch (e) { log('safeSend failed', e && e.message ? e.message : e); }
+// --- ws helpers ---
+function safeSend(ws, obj){
+  try { ws.send(JSON.stringify(obj)); } catch(e){ log('safeSend failed', e && e.message ? e.message : e); }
 }
-function safeSendAll(obj) {
+function broadcast(obj){
   const s = JSON.stringify(obj);
   sockets.forEach(ws => { if (ws.readyState === WebSocket.OPEN) ws.send(s); });
 }
-function broadcast(obj) { safeSendAll(obj); }
 
-// ---- channel filter helper (exclude voice & categories) ----
-function isTextLikeChannel(ch) {
+// --- channel filter ---
+function isTextLikeChannel(ch){
   if (!ch) return false;
   if (typeof ch.isText === 'function') {
     try { return !!ch.isText(); } catch(e) {}
   }
-  const textLike = new Set(['GUILD_TEXT','GUILD_NEWS','GUILD_PUBLIC_THREAD','GUILD_PRIVATE_THREAD','TEXT','NEWS','GUILD_FORUM']);
+  const textLike = new Set(['GUILD_TEXT','GUILD_NEWS','TEXT','NEWS','GUILD_FORUM','GUILD_PUBLIC_THREAD','GUILD_PRIVATE_THREAD']);
   const voiceOrCategory = new Set(['GUILD_VOICE','GUILD_STAGE_VOICE','GUILD_CATEGORY','VOICE','CATEGORY']);
   if (typeof ch.type === 'string') {
     if (voiceOrCategory.has(ch.type)) return false;
     if (textLike.has(ch.type)) return true;
   }
   if (typeof ch.type === 'number') {
-    if (ch.type === 0 || ch.type === 5) return true; // text/news
+    if (ch.type === 0 || ch.type === 5) return true; // text/news numeric ids
     return false;
   }
   return false;
 }
 
-// ---- cache builder (one-time on startup if no disk cache) ----
-async function ensureGuildsFetched() {
+// --- one-time cache build (optional) ---
+async function ensureGuildsFetched(){
   if (client.guilds.cache && client.guilds.cache.size > 0) return;
   try {
-    log('guilds.cache empty — attempting client.guilds.fetch()');
     await client.guilds.fetch();
     const start = Date.now();
-    while (client.guilds.cache.size === 0 && Date.now() - start < 5000) await sleep(200);
-  } catch (e) { log('ensureGuildsFetched error', e && e.message ? e.message : e); }
+    while (client.guilds.cache.size === 0 && Date.now() - start < 3000) await sleep(200);
+  } catch(e){ log('guilds.fetch nonfatal', e && e.message ? e.message : e); }
 }
 
-async function buildCacheOnce({progressively=true} = {}) {
-  if (cacheBuilding) { log('buildCacheOnce already running — skipping'); return; }
+async function buildCacheOnce(progressively=true){
+  if (cacheBuilding) return;
   cacheBuilding = true;
-  log('Starting one-time cache build...');
+  log('Building cache (one-time)');
   state.servers = [];
   await ensureGuildsFetched();
-  const guilds = Array.from(client.guilds.cache.values());
-  for (let i=0;i<guilds.length;i++){
-    const g = guilds[i];
+  for (const guild of Array.from(client.guilds.cache.values())) {
     try {
-      try { await g.channels.fetch(); } catch(e){}
+      try { await guild.channels.fetch(); } catch(e){}
       const channels = [];
-      for (const [cid,ch] of g.channels.cache) {
+      for (const [cid,ch] of guild.channels.cache) {
         if (isTextLikeChannel(ch)) channels.push({ id: ch.id, name: ch.name });
       }
-      state.servers.push({ id: g.id, name: g.name, channels });
-      if (progressively) broadcast({ type:'serverPartial', guild: { id: g.id, name: g.name, channels } });
-      log('Cached guild:', g.name, 'text-channels=', channels.length);
-    } catch (e) {
-      log('Error caching guild', g && g.id, e && e.message ? e.message : e);
-    }
-    if (i % 5 === 0) await sleep(120);
+      state.servers.push({ id: guild.id, name: guild.name, channels });
+      if (progressively) broadcast({ type:'serverPartial', guild:{ id: guild.id, name: guild.name, channels } });
+      log('Cached', guild.name, 'channels=', channels.length);
+    } catch(e){ log('cache guild error', guild.id, e && e.message ? e.message : e); }
+    await sleep(80);
   }
-  state.ready = true;
-  broadcast({ type: 'ready', value: true });
-  broadcast({ type: 'serverList', servers: state.servers });
-  saveStateToDiskDebounced();
+  state.cacheReady = true;
+  broadcast({ type:'serverList', servers: state.servers });
+  saveCacheDebounced();
   cacheBuilding = false;
-  log('One-time cache build complete; ready=true');
+  log('Cache built; cacheReady=true');
 }
 
-// ---- pick display text (text -> embed -> attachment -> fallback) ----
+// --- pick display text ---
 function pickDisplayText({ trimmed, embeds, attachments }) {
-  if (trimmed && trimmed.length > 0) return trimmed;
+  if (trimmed && trimmed.length) return trimmed;
   if (Array.isArray(embeds) && embeds.length) {
     if (embeds[0].description) return embeds[0].description;
     if (embeds[0].title) return embeds[0].title;
@@ -176,76 +147,55 @@ function pickDisplayText({ trimmed, embeds, attachments }) {
   return '[no content]';
 }
 
-// ---- message forwarding and ping detection ----
+// --- message forwarding & ping detection ---
 client.on('messageCreate', m => {
   try {
-    if (!m.guild || !m.channel) return; // ignore DMs
-    if (m.webhookId) return;            // ignore webhooks
-    if (m.author && m.author.bot && client.user && m.author.id !== client.user.id) return; // ignore other bots
+    if (!m.guild || !m.channel) return;
+    if (m.webhookId) return;
+    if (m.author && m.author.bot && client.user && m.author.id !== client.user.id) return;
 
     const raw = typeof m.content === 'string' ? m.content : '';
     const trimmed = raw.replace(/\u200B/g,'').trim();
-    const cLen = trimmed.length;
-
     const attachments = [];
-    if (m.attachments && m.attachments.size) {
-      for (const [, a] of m.attachments) {
-        if (a && a.url) attachments.push({ url: a.url, name: a.name || null, contentType: a.contentType || null });
-      }
-    }
-
-    const embeds = (m.embeds || []).map(e => ({ title: e.title || null, description: e.description || null, type: e.type || null }));
-    const mentions = [];
-    if (m.mentions && m.mentions.users && typeof m.mentions.users.forEach === 'function') {
-      m.mentions.users.forEach(u => mentions.push({ id: u.id, username: u.username }));
-    }
+    if (m.attachments && m.attachments.size) for (const [,a] of m.attachments) if (a && a.url) attachments.push({ url:a.url, name:a.name||null });
 
     // dedupe per-channel
-    try {
-      const last = lastMessagePerChannel.get(m.channel.id);
-      if (last && last.id === m.id && (Date.now() - last.ts) < DEDUPE_WINDOW_MS) return;
-      lastMessagePerChannel.set(m.channel.id, { id: m.id, ts: Date.now() });
-    } catch(e){}
+    const last = lastMessagePerChannel.get(m.channel.id);
+    if (last && last.id === m.id && (Date.now() - last.ts) < DEDUPE_WINDOW_MS) return;
+    lastMessagePerChannel.set(m.channel.id, { id: m.id, ts: Date.now() });
 
-    const displayText = pickDisplayText({ trimmed, embeds, attachments });
-    const fromSelf = client.user && m.author && (m.author.id === client.user.id);
-
+    const displayText = pickDisplayText({ trimmed, embeds: m.embeds || [], attachments });
     const payload = {
       type: 'message',
       data: {
         messageId: m.id,
         rawContent: raw,
         trimmedContent: trimmed,
-        contentLength: cLen,
         displayText,
         attachments,
-        embeds,
-        mentions,
-        isReply: !!(m.reference && (m.reference.messageId || m.reference.channelId)),
-        author: { id: m.author?.id || '', username: m.author?.username || '', bot: !!m.author?.bot },
+        author: { id: m.author?.id||'', username: m.author?.username||'', bot: !!m.author?.bot },
         guildId: m.guild.id,
         guildName: m.guild.name || '',
         channelId: m.channel.id,
         channelName: m.channel.name || '',
         timestamp: m.createdTimestamp || Date.now(),
-        fromSelf
+        fromSelf: client.user && m.author && (m.author.id === client.user.id)
       }
     };
 
-    safeSendAll(payload);
+    broadcast(payload);
 
-    // ping detection (mentions of our user)
+    // ping detection
     let pinged = false;
     if (client.user && m.mentions && m.mentions.users && typeof m.mentions.users.has === 'function') {
       try { pinged = m.mentions.users.has(client.user.id); } catch(e){}
     }
-
     if (pinged) {
       const pingPayload = {
         type: 'ping',
         data: {
           messageId: m.id,
-          from: { id: m.author?.id || '', username: m.author?.username || '' },
+          from: { id: m.author?.id||'', username: m.author?.username||'' },
           guildId: m.guild.id,
           guildName: m.guild.name || '',
           channelId: m.channel.id,
@@ -254,125 +204,96 @@ client.on('messageCreate', m => {
           timestamp: m.createdTimestamp || Date.now()
         }
       };
-      safeSendAll(pingPayload);
-      log('Ping forwarded from', m.author && m.author.username, 'in', m.guild && m.guild.name);
+      broadcast(pingPayload);
+      log('Ping forwarded from', m.author && m.author.username);
     }
-  } catch (err) {
-    log('messageCreate handler error', err && err.message ? err.message : err);
-  }
+  } catch (err) { log('messageCreate error', err && err.message ? err.message : err); }
 });
 
-// ---- sending / queue handling (idempotent) ----
-async function handleSendRequest(msg, fromQueue=false) {
+// --- robust send: DO NOT queue if discordConnected, only queue when discord NOT connected ---
+async function handleSend(msg) {
+  // msg: { guildId?, guildName?, channelId?, channelName?, content, ref? }
   const ref = msg.ref ? String(msg.ref) : null;
   if (ref && state.processedRefs.has(ref)) {
-    log('handleSendRequest: skipping already-processed ref', ref);
+    log('Skipping already processed ref', ref);
     broadcast({ type:'ack', ok:true, ref, skipped:true });
-    return true;
+    return { ok:true, skipped:true };
   }
 
-  let targetChannel = null;
+  let channel = null;
   try {
+    // direct by channelId first
     if (msg.channelId) {
-      try { targetChannel = await client.channels.fetch(String(msg.channelId)); } catch(e){ log('fetch channelId failed', e && e.message ? e.message : e); }
+      try { channel = await client.channels.fetch(String(msg.channelId)); } catch(e){ log('channel.fetch failed', e && e.message ? e.message : e); }
     }
 
-    if (!targetChannel) {
+    // otherwise find via guild
+    if (!channel) {
       let guild = null;
-      if (msg.guildId) guild = client.guilds.cache.get(String(msg.guildId)) || client.guilds.cache.find(g => g.id === String(msg.guildId));
-      if (!guild && msg.guildName) guild = client.guilds.cache.find(g => g.name === msg.guildName || g.id === msg.guildName);
+      if (msg.guildId) {
+        try { guild = await client.guilds.fetch(String(msg.guildId)); } catch(e){ log('guild.fetch by id failed', e && e.message ? e.message : e); }
+      }
+      if (!guild && msg.guildName) {
+        guild = client.guilds.cache.find(g => g.name === msg.guildName || g.id === msg.guildName) || null;
+      }
       if (!guild) throw new Error('Guild not found');
-      try { await guild.channels.fetch(); } catch(e){}
-      if (msg.channelId) targetChannel = guild.channels.cache.get(String(msg.channelId));
-      if (!targetChannel && msg.channelName) {
-        targetChannel = guild.channels.cache.find(c => (c.name === msg.channelName || c.id === msg.channelName) && isTextLikeChannel(c));
+
+      try { await guild.channels.fetch(); } catch(e){ /* nonfatal */ }
+      if (msg.channelId) channel = guild.channels.cache.get(String(msg.channelId));
+      if (!channel && msg.channelName) {
+        channel = guild.channels.cache.find(c => (c.name === msg.channelName || c.id === msg.channelName) && isTextLikeChannel(c));
       }
     }
 
-    if (!targetChannel || !('send' in targetChannel)) throw new Error('Channel not found or not sendable');
+    if (!channel || !('send' in channel)) throw new Error('Channel not found or not sendable');
 
-    const content = String(msg.content ?? '');
-    await targetChannel.send(content);
+    await channel.send(String(msg.content || ''));
 
-    if (ref) {
-      state.processedRefs.add(ref);
-      saveStateToDiskDebounced();
-    }
+    if (ref) { state.processedRefs.add(ref); saveCacheDebounced(); }
 
     broadcast({ type:'ack', ok:true, ref });
-    log('handleSendRequest: sent message to', targetChannel.id, 'ref=', ref);
-    return true;
+    log('Sent message to', channel.id, 'ref=', ref);
+    return { ok:true, ref };
   } catch (e) {
-    const errStr = e && e.message ? e.message : String(e);
-    log('handleSendRequest error', errStr, 'ref=', ref);
-    if (!state.ready && !fromQueue) {
-      if (!state.queue.find(q => q.req && q.req.ref === ref)) {
-        state.queue.push({ req: msg, tries: 0, queuedAt: Date.now() });
-        broadcast({ type:'ack', ok:false, ref, queued:true, error:'queued-not-ready' });
-        saveStateToDiskDebounced();
-        log('Queued send (not ready) ref=', ref);
-      }
-      return false;
-    }
-    return false;
+    const err = e && e.message ? e.message : String(e);
+    log('handleSend error', err, 'ref=', ref);
+    broadcast({ type:'ack', ok:false, ref, error: err });
+    return { ok:false, error: err, ref };
   }
 }
 
-async function processQueue() {
-  if (processingQueue) { log('processQueue already running — skipping'); return; }
+// --- queue processing (only used when discord not connected, or to retry) ---
+async function processQueue(){
+  if (processingQueue) return;
   processingQueue = true;
-  log('processQueue starting. queueLen=', state.queue.length);
-
+  log('processQueue start; len=', state.queue.length);
   try {
-    while (state.queue.length > 0) {
+    while (state.queue.length > 0 && state.discordConnected) {
       const item = state.queue.shift();
-      const msg = item.req;
-      item.tries = item.tries ? item.tries : 0;
-      const ref = msg.ref ? String(msg.ref) : null;
-
-      if (ref && state.processedRefs.has(ref)) {
-        log('processQueue skipping already processed ref', ref);
-        broadcast({ type:'ack', ok:true, ref, skipped:true });
-        continue;
-      }
-
       try {
-        const ok = await handleSendRequest(msg, true);
-        if (ok) { await sleep(150); continue; }
-        item.tries = (item.tries || 0) + 1;
-        if (item.tries < MAX_SEND_RETRIES) {
-          const backoff = BASE_BACKOFF_MS * Math.pow(2, Math.min(6, item.tries));
-          log('processQueue requeueing ref=', ref, 'tries=', item.tries, 'backoff=', backoff);
-          item.queuedAt = Date.now();
-          state.queue.push(item);
-          await sleep(backoff);
-        } else {
-          log('processQueue dropping item after retries ref=', ref);
-          broadcast({ type:'ack', ok:false, ref, error:'max-retries' });
-        }
-      } catch (e) {
-        log('processQueue unexpected error', e && e.message ? e.message : e);
-      }
+        await handleSend(item.req);
+        await sleep(120);
+      } catch(e){ log('processQueue item error', e && e.message ? e.message : e); }
     }
   } finally {
     processingQueue = false;
-    log('processQueue finished. queueLen=', state.queue.length);
-    saveStateToDiskDebounced();
+    log('processQueue finished; remaining=', state.queue.length);
+    saveCacheDebounced();
   }
 }
 
-// ---- WebSocket server ----
-const wss = new WebSocket.Server({ port: PORT }, () => log(`WebSocket listening on 0.0.0.0:${PORT}`));
-loadStateFromDisk();
+// --- WebSocket server ---
+const wss = new WebSocket.Server({ port: PORT }, () => log('WebSocket listening on', PORT));
+loadCache();
 
 wss.on('connection', (ws, req) => {
   sockets.push(ws);
-  log('Client connected from', req.socket.remoteAddress);
+  log('Client connected', req.socket.remoteAddress);
 
-  // send immediate state (no recache)
-  safeSend(ws, { type:'bridgeStatus', bridgeConnected:true, discordReady: !!state.ready });
-  safeSend(ws, { type:'ready', value: !!state.ready });
-  if (state.servers.length > 0) safeSend(ws, { type:'serverList', servers: state.servers });
+  // send immediate status: discordConnected matters for "discord ready"
+  safeSend(ws, { type:'bridgeStatus', bridgeConnected:true, discordReady: !!state.discordConnected });
+  safeSend(ws, { type:'ready', value: !!state.discordConnected }); // extension expects 'ready'
+  if (state.servers.length) safeSend(ws, { type:'serverList', servers: state.servers });
 
   ws.on('message', async raw => {
     let msg;
@@ -381,78 +302,74 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'ping') { safeSend(ws, { type:'pong', ts: Date.now() }); return; }
 
     if (msg.type === 'getServerList') {
-      // no auto rebuild; only serve cached data
       safeSend(ws, { type:'serverList', servers: state.servers });
-      return;
-    }
-
-    if (msg.type === 'refreshServers') {
-      // developer-only explicit refresh: ONLY if you explicitly call this (not automatic)
-      try {
-        state.ready = false; broadcast({ type:'ready', value:false });
-        await buildCacheOnce({progressively:true});
-      } catch (e) { log('manual refreshServers failed', e && e.message ? e.message : e); }
       return;
     }
 
     if (msg.type === 'sendMessage') {
       if (!msg.ref) msg.ref = Date.now().toString();
-      if (state.ready) {
-        const ok = await handleSendRequest(msg, false);
-        if (!ok) {
-          if (!state.queue.find(q => q.req && q.req.ref === msg.ref)) {
-            state.queue.push({ req: msg, tries: 0, queuedAt: Date.now() });
-            saveStateToDiskDebounced();
-            log('sendMessage pushed to queue after immediate failure ref=', msg.ref);
-          }
-          if (!processingQueue) processQueue().catch(e => log('processQueue crash', e && e.message));
-        }
+      // if discord is connected, attempt send now (don't queue just because cache not ready)
+      if (state.discordConnected) {
+        const res = await handleSend(msg);
+        // if handleSend failed for some reason (e.g., channel not found), reply already sent by handleSend
+        // we only queue if discord not connected
       } else {
+        // discord not connected -> queue for later
         if (!state.queue.find(q => q.req && q.req.ref === msg.ref)) {
           state.queue.push({ req: msg, tries: 0, queuedAt: Date.now() });
-          broadcast({ type:'ack', ok:false, ref: msg.ref, queued:true, error:'queued-not-ready' });
-          saveStateToDiskDebounced();
-          log('sendMessage queued (not ready) ref=', msg.ref);
-        }
+          safeSend(ws, { type:'ack', ok:false, ref: msg.ref, queued:true, error:'queued-not-connected' });
+          saveCacheDebounced();
+          log('Queued send since discord not connected ref=', msg.ref);
+        } else log('Already queued ref=', msg.ref);
       }
+      return;
+    }
+
+    if (msg.type === 'refreshServers' || msg.type === 'forceRefresh') {
+      // we intentionally do NOT auto-refresh; allow manual one-time refresh if you ask
+      try {
+        await buildCacheOnce(true);
+      } catch(e){ log('manual buildCacheOnce failed', e && e.message ? e.message : e); }
       return;
     }
 
     safeSend(ws, { type:'error', error:'unknown-request', raw: msg });
   });
 
-  ws.on('close', () => { sockets = sockets.filter(s => s !== ws); log('Client disconnected'); });
-  ws.on('error', (err) => log('ws error', err && err.message ? err.message : err));
+  ws.on('close', () => { sockets = sockets.filter(s => s !== ws); log('WS client disconnected'); });
+  ws.on('error', e => log('ws error', e && e.message ? e.message : e));
 });
 
-// ---- client ready handler & startup ----
+// --- client login & ready handler ---
 client.on('ready', async () => {
   try {
-    log('[Discord] Ready as', client.user && (client.user.tag || client.user.username));
-    // build once at startup if no cache present
-    if (!state.servers || state.servers.length === 0) {
-      try { await buildCacheOnce({progressively:true}); } catch (e) { log('one-time buildCache failed', e && e.message ? e.message : e); }
-    } else {
-      state.ready = true;
-      broadcast({ type:'ready', value:true });
-      log('Loaded servers from disk; ready=true');
-    }
+    log('Discord client ready as', client.user && (client.user.tag || client.user.username));
+    state.discordConnected = true;
 
-    // broadcast discordReady info
+    // immediately broadcast discord-ready so extension shows true
+    broadcast({ type:'ready', value: true });            // extension expects 'ready'
     broadcast({ type:'discordReady', data: { id: client.user?.id || null, username: client.user?.username || null } });
 
-    // process queued sends once
-    if (!processingQueue && state.queue.length > 0) processQueue().catch(e => log('processQueue crash', e && e.message));
+    // build cache once if no cached servers exist (non-blocking)
+    if (!state.servers || state.servers.length === 0) {
+      try { await buildCacheOnce(true); } catch(e){ log('buildCacheOnce failed', e && e.message ? e.message : e); }
+    } else {
+      // still broadcast cached server list
+      safeSendAll({ type:'serverList', servers: state.servers });
+    }
+
+    // process queue now that we're connected
+    if (state.queue.length > 0) processQueue().catch(e => log('processQueue error', e && e.message ? e.message : e));
   } catch (e) {
-    log('client.ready handler error', e && e.message ? e.message : e);
+    log('ready handler error', e && e.message ? e.message : e);
   }
 });
 
-(async function start(){
+(async function startup(){
   try {
     await client.login(TOKEN);
-    log('Discord login attempt complete');
-  } catch (e) {
+    log('Attempted Discord login');
+  } catch(e){
     log('Discord login failed:', e && e.message ? e.message : e);
     process.exit(1);
   }
